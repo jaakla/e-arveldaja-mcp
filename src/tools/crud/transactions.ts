@@ -9,7 +9,10 @@ import { toolResponse } from "../../tool-response.js";
 import { HttpError } from "../../http-client.js";
 import { applyListView, viewParam } from "../../list-views.js";
 import { validateTransactionDistributionDimensions } from "../../account-validation.js";
-import type { Transaction } from "../../types/api.js";
+import type { Transaction, TransactionDistribution } from "../../types/api.js";
+import { buildLedgerRegistry } from "../../ledger/registry.js";
+import { unwrap } from "../../ledger/result.js";
+import type { Payment, PaymentAllocation } from "../../ledger/types.js";
 import type { ApiContext } from "./shared.js";
 import {
   coerceId,
@@ -22,6 +25,24 @@ import {
   parseTransactionDistributions,
   validateTransactionUpdateData,
 } from "./shared.js";
+
+/**
+ * Map an e-arveldaja transaction distribution to a canonical PaymentAllocation.
+ * Account distributions carry their sub-account (related_sub_id) as an account
+ * dimension; invoice distributions become invoice target refs.
+ */
+function distributionToAllocation(d: TransactionDistribution): PaymentAllocation {
+  const amount = { amount: String(d.amount), currency: "EUR" };
+  if (d.related_table === "accounts") {
+    return {
+      target: { account: String(d.related_id) },
+      amount,
+      ...(d.related_sub_id != null ? { dimensions: [{ axis: "account", value: String(d.related_sub_id) }] } : {}),
+    };
+  }
+  const entity = d.related_table === "sale_invoices" ? "salesInvoice" : "purchaseInvoice";
+  return { target: { entity, backend: "e-arveldaja", value: String(d.related_id) }, amount };
+}
 
 export function registerTransactionTools(server: McpServer, api: ApiContext): void {
   // =====================
@@ -201,26 +222,22 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       }
     }
 
-    let clientsIdWasSet = false;
-    if (clients_id) {
-      const tx = await api.transactions.get(id);
-      if (!tx.clients_id) {
-        await api.transactions.update(id, { clients_id } as Partial<Transaction>);
-        clientsIdWasSet = true;
-      }
-    }
-
-    let result: Awaited<ReturnType<typeof api.transactions.confirm>>;
-    try {
-      result = await api.transactions.confirm(id, dist);
-    } catch (error) {
-      if (clientsIdWasSet) {
-        try {
-          await api.transactions.update(id, { clients_id: null } as Partial<Transaction>);
-        } catch { /* best effort rollback */ }
-      }
-      throw error;
-    }
+    // Route the confirmation through the LedgerConnector port. Booking a bank
+    // transaction against invoices/accounts is exactly the canonical
+    // recordPayment operation; the e-arveldaja transaction id and the optional
+    // explicit clients_id (with pre-set + rollback) ride in `raw`. Distribution
+    // sub-account ids map to the allocation's account dimension.
+    const connector = buildLedgerRegistry(api).get("e-arveldaja")!;
+    const payment: Payment = {
+      // The transaction already knows its own bank/date/amount; these canonical
+      // fields are unused on the e-arveldaja transaction-confirm path.
+      bank: { entity: "account", backend: "e-arveldaja", value: "" },
+      date: "",
+      amount: { amount: "0", currency: "EUR" },
+      allocations: (dist ?? []).map(distributionToAllocation),
+      raw: { transaction_id: id, ...(clients_id !== undefined ? { clients_id } : {}) },
+    };
+    const settled = unwrap(await connector.recordPayment(payment));
     logAudit({
       tool: "confirm_transaction", action: "CONFIRMED", entity_type: "transaction", entity_id: id,
       summary: `Confirmed transaction ${id}`,
@@ -231,7 +248,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       entity: "transaction",
       id,
       message: `Confirmed transaction ${id}.`,
-      raw: result,
+      raw: settled,
     });
   });
 

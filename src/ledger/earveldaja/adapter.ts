@@ -14,15 +14,15 @@ import type { ApiContext } from "../../tools/crud/shared.js";
 import type {
   Account, Item, JournalEntry, Party, Payment, PurchaseInvoice, Ref,
   Result, SalesInvoice, StatementSection, TaxRate, TrialBalanceRow, DocStatus,
-  Money,
+  Money, Posting, InvoiceLine,
 } from "../types.js";
 import type { Capabilities, LedgerConnector, ListQuery } from "../port.js";
 import { ok, fail, fromThrown } from "../result.js";
 import type {
   Client, Product, Posting as EaPosting, SaleInvoice as EaSaleInvoice,
   PurchaseInvoice as EaPurchaseInvoice, TransactionDistribution, SaleInvoiceItem,
+  PurchaseInvoiceItem, CreatePurchaseInvoiceData, Journal as EaJournal, Transaction,
 } from "../../types/api.js";
-import type { InvoiceLine } from "../types.js";
 
 const BACKEND_ID = "e-arveldaja";
 
@@ -166,21 +166,45 @@ export class EarveldajaAdapter implements LedgerConnector {
 
   async createPurchaseInvoice(inv: PurchaseInvoice): Promise<Result<PurchaseInvoice>> {
     try {
-      const raw = (inv.raw ?? {}) as Partial<EaPurchaseInvoice>;
-      const clientsId = "name" in inv.vendor ? raw.clients_id : refToInt(inv.vendor);
-      if (clientsId == null) {
+      // Internal hint keys (prefixed __) carry the invoice-level totals + VAT
+      // registration the createAndSetTotals path needs; everything else in `raw`
+      // is a real CreatePurchaseInvoiceData field.
+      const raw = (inv.raw ?? {}) as Record<string, unknown>;
+      const {
+        __setTotals, __vatPrice, __grossPrice, __isVatReg,
+        items: rawItems, clients_id: rawClientsId, client_name: rawClientName,
+        journal_date: rawJournalDate, ...rest
+      } = raw;
+      const clientsId = "name" in inv.vendor ? Number(rawClientsId) : refToInt(inv.vendor);
+      if (!Number.isFinite(clientsId)) {
         return fail({ code: "validation", message: "e-arveldaja needs a clients_id; pass an existing vendor Ref or raw.clients_id" });
       }
-      const body: Partial<EaPurchaseInvoice> = {
-        ...raw,
+      const items = inv.lines.length > 0
+        ? linesToPurchaseItems(inv.lines)
+        : (rawItems as PurchaseInvoiceItem[] | undefined) ?? [];
+      const data = {
+        ...(rest as Partial<CreatePurchaseInvoiceData>),
         clients_id: clientsId,
-        client_name: "name" in inv.vendor ? inv.vendor.name : (raw.client_name ?? ""),
+        client_name: "name" in inv.vendor ? inv.vendor.name : (rawClientName as string | undefined) ?? "",
         number: inv.vendorBillNo,
-        cl_currencies_id: inv.currency,
         create_date: inv.docDate,
-        journal_date: inv.docDate,
-      };
-      const res = await this.api.purchaseInvoices.create(body);
+        journal_date: (rawJournalDate as string | undefined) ?? inv.dueDate ?? inv.docDate,
+        cl_currencies_id: inv.currency,
+        items,
+      } as CreatePurchaseInvoiceData;
+
+      // createAndSetTotals mirrors the create_purchase_invoice tool: it PATCHes
+      // invoice-level vat_price/gross_price the API does not auto-compute.
+      if (__setTotals) {
+        const res = await this.api.purchaseInvoices.createAndSetTotals(
+          data,
+          __vatPrice != null ? Number(__vatPrice) : undefined,
+          __grossPrice != null ? Number(__grossPrice) : undefined,
+          Boolean(__isVatReg),
+        );
+        return ok({ ...inv, id: intRef("purchaseInvoice", res.id), status: "draft", settle: "unpaid" });
+      }
+      const res = await this.api.purchaseInvoices.create(data);
       return ok({ ...inv, id: intRef("purchaseInvoice", res.created_object_id), status: "draft", settle: "unpaid" });
     } catch (e) { return fail(fromThrown(e)); }
   }
@@ -199,37 +223,60 @@ export class EarveldajaAdapter implements LedgerConnector {
    * the distribution array.
    */
   async recordPayment(p: Payment): Promise<Result<Payment>> {
-    try {
-      const transactionId = Number((p.raw as { transaction_id?: number } | undefined)?.transaction_id);
-      if (!Number.isInteger(transactionId) || transactionId <= 0) {
-        return fail({ code: "unsupported", message: "e-arveldaja settles by confirming an imported bank transaction; pass raw.transaction_id" });
+    const raw = (p.raw ?? {}) as { transaction_id?: number; clients_id?: number };
+    const transactionId = Number(raw.transaction_id);
+    if (!Number.isInteger(transactionId) || transactionId <= 0) {
+      return fail({ code: "unsupported", message: "e-arveldaja settles by confirming an imported bank transaction; pass raw.transaction_id" });
+    }
+    const distributions: TransactionDistribution[] = p.allocations.map((a) => {
+      if ("account" in a.target) {
+        const subId = accountDimensionId(a.dimensions);
+        return {
+          related_table: "accounts",
+          related_id: Number(a.target.account),
+          ...(subId != null ? { related_sub_id: subId } : {}),
+          amount: Number(a.amount.amount),
+        };
       }
-      const distributions: TransactionDistribution[] = p.allocations.map((a) => {
-        if ("account" in a.target) {
-          return { related_table: "accounts", related_id: Number(a.target.account), amount: Number(a.amount.amount) };
+      const table = a.target.entity === "salesInvoice" ? "sale_invoices" : "purchase_invoices";
+      return { related_table: table, related_id: refToInt(a.target), amount: Number(a.amount.amount) };
+    });
+
+    // Optional explicit clients_id pre-set (account distributions with no linked
+    // invoice to auto-resolve from), with rollback on confirm failure — mirrors
+    // the confirm_transaction tool's behaviour.
+    let clientsIdWasSet = false;
+    try {
+      if (raw.clients_id) {
+        const tx = await this.api.transactions.get(transactionId);
+        if (!tx.clients_id) {
+          await this.api.transactions.update(transactionId, { clients_id: raw.clients_id } as Partial<Transaction>);
+          clientsIdWasSet = true;
         }
-        const table = a.target.entity === "salesInvoice" ? "sale_invoices" : "purchase_invoices";
-        return { related_table: table, related_id: refToInt(a.target), amount: Number(a.amount.amount) };
-      });
-      await this.api.transactions.confirm(transactionId, distributions);
+      }
+      await this.api.transactions.confirm(transactionId, distributions.length > 0 ? distributions : undefined);
       return ok({ ...p, id: intRef("payment", transactionId), status: "confirmed" });
-    } catch (e) { return fail(fromThrown(e)); }
+    } catch (e) {
+      if (clientsIdWasSet) {
+        try { await this.api.transactions.update(transactionId, { clients_id: null } as Partial<Transaction>); } catch { /* best-effort rollback */ }
+      }
+      return fail(fromThrown(e));
+    }
   }
 
-  /** Explicit booking: postings land as a registered journal. */
+  /** Explicit booking: postings land as a draft journal (confirm separately). */
   async postJournal(entry: JournalEntry): Promise<Result<JournalEntry>> {
     try {
-      const postings: EaPosting[] = entry.postings.map((p) => ({
-        accounts_id: Number(p.account),
-        type: p.debit ? "D" : "C",
-        amount: Number((p.debit ?? p.credit)?.amount ?? 0),
-      }));
-      const res = await this.api.journals.create({
+      // Journal-level extras (clients_id, cl_currencies_id, …) ride in entry.raw.
+      const raw = (entry.raw ?? {}) as Partial<EaJournal>;
+      const body: Partial<EaJournal> = {
+        ...raw,
         effective_date: entry.date,
-        title: entry.memo,
-        document_number: entry.docNo,
-        postings,
-      });
+        ...(entry.memo !== undefined ? { title: entry.memo } : {}),
+        ...(entry.docNo !== undefined ? { document_number: entry.docNo } : {}),
+        postings: entry.postings.map(postingToEaPosting),
+      };
+      const res = await this.api.journals.create(body);
       return ok({ ...entry, id: intRef("journal", res.created_object_id), status: "draft" });
     } catch (e) { return fail(fromThrown(e)); }
   }
@@ -306,6 +353,59 @@ export function linesToSaleItems(lines: InvoiceLine[]): SaleInvoiceItem[] {
     };
     return { ...base, ...(l.raw ?? {}) } as SaleInvoiceItem;
   });
+}
+
+/**
+ * Map canonical invoice lines to e-arveldaja PurchaseInvoiceItem rows. As with
+ * the sale side, common fields come from the canonical shape and each line's
+ * `raw` carries the backend-specific remainder (purchase article, VAT account,
+ * fringe-benefit id, …) so the round-trip is lossless.
+ */
+export function linesToPurchaseItems(lines: InvoiceLine[]): PurchaseInvoiceItem[] {
+  return lines.map((l) => {
+    const productsId = l.item && "value" in l.item ? Number(l.item.value) : undefined;
+    const base: Partial<PurchaseInvoiceItem> = {
+      custom_title: l.description ?? (l.item && "name" in l.item ? l.item.name : "") ?? "",
+      ...(productsId != null ? { products_id: productsId } : {}),
+      amount: Number(l.quantity),
+      unit_net_price: Number(l.unitPrice.amount),
+      ...(l.account ? { purchase_accounts_id: Number(l.account) } : {}),
+    };
+    return { ...base, ...(l.raw ?? {}) } as PurchaseInvoiceItem;
+  });
+}
+
+/** Map a canonical posting's dimensions onto e-arveldaja posting dimension fields. */
+function postingDimensions(dims?: Posting["dimensions"]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const d of dims ?? []) {
+    const v = Number(typeof d.value === "string" ? d.value : d.value.value);
+    if (!Number.isFinite(v)) continue;
+    if (d.axis === "account") out.accounts_dimensions_id = v;
+    else if (d.axis === "project") out.projects_project_id = v;
+    else if (d.axis === "location") out.projects_location_id = v;
+    else if (d.axis === "reportingPerson") out.projects_person_id = v;
+  }
+  return out;
+}
+
+/** Map a canonical Posting to an e-arveldaja Posting; line `raw` overrides for fidelity. */
+export function postingToEaPosting(p: Posting): EaPosting {
+  const base: EaPosting = {
+    accounts_id: Number(p.account),
+    type: p.debit ? "D" : "C",
+    amount: Number((p.debit ?? p.credit)?.amount ?? 0),
+    ...postingDimensions(p.dimensions),
+  };
+  return { ...base, ...(p.raw ?? {}) } as EaPosting;
+}
+
+/** Pull the account sub-account (related_sub_id) from an allocation's dimensions. */
+function accountDimensionId(dims?: { axis: string; value: Ref<"dimension"> | string }[]): number | undefined {
+  const d = dims?.find((x) => x.axis === "account");
+  if (!d) return undefined;
+  const v = Number(typeof d.value === "string" ? d.value : d.value.value);
+  return Number.isFinite(v) ? v : undefined;
 }
 
 function toCanonicalParty(c: Client): Party {

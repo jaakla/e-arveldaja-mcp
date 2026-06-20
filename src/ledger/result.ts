@@ -10,6 +10,24 @@ export function fail<T = never>(error: LedgerError): Result<T> {
 }
 
 /**
+ * Return the data from a successful Result, or throw an Error carrying the
+ * LedgerError's message and structured fields. Used at the tool boundary so a
+ * backend failure propagates (and is serialized by the MCP error path) the same
+ * way a thrown HttpError did before a tool was migrated onto the port.
+ */
+export function unwrap<T>(result: Result<T>): T {
+  if (result.ok) return result.data;
+  const err = Object.assign(new Error(result.error.message), { code: result.error.code });
+  if (result.error.upstreamDetail !== undefined) {
+    (err as { upstream_detail?: string }).upstream_detail = result.error.upstreamDetail;
+  }
+  if (result.error.retryable !== undefined) {
+    (err as { retryable?: boolean }).retryable = result.error.retryable;
+  }
+  throw err;
+}
+
+/**
  * Map an arbitrary thrown error onto a `LedgerError`. Recognizes the repo's
  * `HttpError` shape (a `status` of number | "network" plus optional
  * `upstream_detail`) without importing it, so this stays backend-neutral.

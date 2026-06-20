@@ -10,6 +10,10 @@ import { HttpError } from "../../http-client.js";
 import { applyListView, viewParam } from "../../list-views.js";
 import { withOpeningBalanceApiLimitation } from "../../opening-balance-limitations.js";
 import { validatePostingDimensions } from "../../account-validation.js";
+import { buildLedgerRegistry } from "../../ledger/registry.js";
+import { unwrap } from "../../ledger/result.js";
+import type { JournalEntry, Posting as LedgerPosting } from "../../ledger/types.js";
+import type { Posting } from "../../types/api.js";
 import type { ApiContext } from "./shared.js";
 import {
   coerceId,
@@ -22,6 +26,21 @@ import {
   parsePostings,
   validateUpdateFields,
 } from "./shared.js";
+
+/**
+ * Map a validated e-arveldaja posting to a canonical ledger Posting. The full
+ * original posting rides in `raw` so the adapter reconstructs the exact backend
+ * payload (lossless round-trip); the canonical fields are populated for clarity.
+ */
+function eaPostingToLedger(p: Posting): LedgerPosting {
+  const amount = { amount: String(p.amount), currency: "EUR" };
+  return {
+    account: String(p.accounts_id),
+    debit: p.type === "D" ? amount : undefined,
+    credit: p.type === "C" ? amount : undefined,
+    raw: p as unknown as Record<string, unknown>,
+  };
+}
 
 export function registerJournalTools(server: McpServer, api: ApiContext): void {
   // =====================
@@ -148,14 +167,26 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
     if (postingErrors.length > 0) {
       return toolError({ error: "Account validation failed", details: postingErrors });
     }
-    const result = await api.journals.create({
-      ...params,
-      cl_currencies_id: params.cl_currencies_id ?? "EUR",
-      postings,
-    });
+
+    // Route the create through the LedgerConnector port (e-arveldaja backend).
+    // Each posting becomes a canonical Posting whose `raw` carries the exact
+    // backend fields, so the adapter reconstructs the identical API payload.
+    const connector = buildLedgerRegistry(api).get("e-arveldaja")!;
+    const entry: JournalEntry = {
+      date: params.effective_date,
+      memo: params.title,
+      docNo: params.document_number,
+      postings: postings.map(eaPostingToLedger),
+      raw: {
+        ...(params.clients_id !== undefined ? { clients_id: params.clients_id } : {}),
+        cl_currencies_id: params.cl_currencies_id ?? "EUR",
+      },
+    };
+    const created = unwrap(await connector.postJournal(entry));
+    const createdId = created.id ? Number(created.id.value) : undefined;
     logAudit({
       tool: "create_journal", action: "CREATED", entity_type: "journal",
-      entity_id: result.created_object_id,
+      entity_id: createdId,
       summary: `Created journal "${params.title ?? ""}" on ${params.effective_date}`,
       details: {
         effective_date: params.effective_date, title: params.title,
@@ -175,9 +206,9 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
     return toolResponse({
       action: "created",
       entity: "journal",
-      id: result.created_object_id,
+      id: createdId,
       message: `Created journal${params.title ? ` "${params.title}"` : ""} on ${params.effective_date}.`,
-      raw: result,
+      raw: created,
     });
   });
 

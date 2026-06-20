@@ -23,6 +23,7 @@ import {
   validateUpdateFields,
 } from "./shared.js";
 import { buildLedgerRegistry } from "../../ledger/registry.js";
+import { unwrap } from "../../ledger/result.js";
 import type { InvoiceLine, SalesInvoice } from "../../ledger/types.js";
 import type { SaleInvoiceItem } from "../../types/api.js";
 
@@ -120,11 +121,8 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
         notes: tagNotes(params.notes),
       },
     };
-    const outcome = await connector.createSalesInvoice(invoice);
-    if (!outcome.ok) {
-      return toolError({ error: "Failed to create sale invoice", details: outcome.error });
-    }
-    const createdId = outcome.data.id ? Number(outcome.data.id.value) : undefined;
+    const created = unwrap(await connector.createSalesInvoice(invoice));
+    const createdId = created.id ? Number(created.id.value) : undefined;
     logAudit({
       tool: "create_sale_invoice", action: "CREATED", entity_type: "sale_invoice",
       entity_id: createdId,
@@ -136,7 +134,7 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
       entity: "sale_invoice",
       id: createdId,
       message: `Created sale invoice for client ${params.clients_id} on ${params.create_date}.`,
-      raw: outcome.data,
+      raw: created,
     });
   });
 

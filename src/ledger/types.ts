@@ -211,6 +211,8 @@ export interface Posting {
   taxCode?: TaxCode;
   dimensions?: Dimension[];
   memo?: string;
+  /** Per-posting escape hatch for backend-specific fields the canonical shape omits. */
+  raw?: Record<string, unknown>;
 }
 
 /**

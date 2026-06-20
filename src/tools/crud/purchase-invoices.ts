@@ -10,7 +10,10 @@ import { DEFAULT_LIABILITY_ACCOUNT } from "../../accounting-defaults.js";
 import { applyListView, viewParam } from "../../list-views.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "../purchase-vat-defaults.js";
 import { validateItemDimensions } from "../../account-validation.js";
-import type { CreatePurchaseInvoiceData } from "../../types/api.js";
+import type { CreatePurchaseInvoiceData, PurchaseInvoiceItem } from "../../types/api.js";
+import { buildLedgerRegistry } from "../../ledger/registry.js";
+import { unwrap } from "../../ledger/result.js";
+import type { InvoiceLine, PurchaseInvoice as LedgerPurchaseInvoice } from "../../ledger/types.js";
 import type { ApiContext } from "./shared.js";
 import {
   coerceId,
@@ -26,6 +29,24 @@ import {
   tagNotes,
   validateUpdateFields,
 } from "./shared.js";
+
+/**
+ * Map a processed e-arveldaja purchase item to a canonical InvoiceLine. The full
+ * original item rides in `raw` so the adapter rebuilds the exact backend payload.
+ */
+function purchaseItemToLine(item: PurchaseInvoiceItem): InvoiceLine {
+  return {
+    item: item.products_id != null
+      ? { entity: "item", backend: "e-arveldaja", value: String(item.products_id) }
+      : undefined,
+    description: item.custom_title,
+    quantity: String(item.amount ?? 1),
+    unitPrice: { amount: String(item.unit_net_price ?? item.total_net_price ?? 0), currency: "EUR" },
+    taxCode: item.vat_rate_dropdown ?? "",
+    account: item.purchase_accounts_id != null ? String(item.purchase_accounts_id) : undefined,
+    raw: item as unknown as Record<string, unknown>,
+  };
+}
 
 export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext): void {
   // =====================
@@ -97,33 +118,42 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
         });
       }
 
-      const invoiceData: CreatePurchaseInvoiceData = {
-        clients_id: params.clients_id,
-        client_name: params.client_name,
-        number: params.number,
-        create_date: params.create_date,
-        journal_date: params.journal_date,
-        term_days: params.term_days,
-        cl_currencies_id: currencyCode,
-        currency_rate: params.currency_rate,
-        base_net_price: params.base_net_price,
-        base_vat_price: params.base_vat_price,
-        base_gross_price: params.base_gross_price,
-        liability_accounts_id: params.liability_accounts_id ?? DEFAULT_LIABILITY_ACCOUNT,
-        bank_ref_number: params.bank_ref_number,
-        bank_account_no: params.bank_account_no,
-        notes: tagNotes(params.notes),
-        items,
+      // Route the create through the LedgerConnector port (e-arveldaja backend).
+      // Items become canonical lines (the adapter maps them back to
+      // PurchaseInvoiceItem, each line's `raw` preserving exact backend fields);
+      // invoice-level fields + the createAndSetTotals inputs ride in `raw` under
+      // __-prefixed hint keys.
+      const connector = buildLedgerRegistry(api).get("e-arveldaja")!;
+      const invoice: LedgerPurchaseInvoice = {
+        vendor: { entity: "party", backend: "e-arveldaja", value: String(params.clients_id) },
+        vendorBillNo: params.number,
+        docDate: params.create_date,
+        dueDate: params.journal_date,
+        currency: currencyCode,
+        lines: items.map(purchaseItemToLine),
+        raw: {
+          client_name: params.client_name,
+          journal_date: params.journal_date,
+          term_days: params.term_days,
+          currency_rate: params.currency_rate,
+          base_net_price: params.base_net_price,
+          base_vat_price: params.base_vat_price,
+          base_gross_price: params.base_gross_price,
+          liability_accounts_id: params.liability_accounts_id ?? DEFAULT_LIABILITY_ACCOUNT,
+          bank_ref_number: params.bank_ref_number,
+          bank_account_no: params.bank_account_no,
+          notes: tagNotes(params.notes),
+          __setTotals: true,
+          __vatPrice: params.vat_price,
+          __grossPrice: params.gross_price,
+          __isVatReg: isVatReg,
+        },
       };
-      const result = await api.purchaseInvoices.createAndSetTotals(
-        invoiceData,
-        params.vat_price,
-        params.gross_price,
-        isVatReg,
-      );
+      const created = unwrap(await connector.createPurchaseInvoice(invoice));
+      const createdId = created.id ? Number(created.id.value) : undefined;
       logAudit({
         tool: "create_purchase_invoice", action: "CREATED", entity_type: "purchase_invoice",
-        entity_id: result.id,
+        entity_id: createdId,
         summary: `Created purchase invoice "${params.number}" from ${params.client_name}`,
         details: {
           supplier_name: params.client_name, invoice_number: params.number,
@@ -134,9 +164,9 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
       return toolResponse({
         action: "created",
         entity: "purchase_invoice",
-        id: result.id,
+        id: createdId,
         message: `Created purchase invoice "${params.number}" from ${params.client_name}.`,
-        raw: result,
+        raw: created,
       });
     });
 

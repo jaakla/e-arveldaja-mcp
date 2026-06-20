@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { EarveldajaAdapter, linesToSaleItems } from "./adapter.js";
+import { EarveldajaAdapter, linesToSaleItems, linesToPurchaseItems, postingToEaPosting } from "./adapter.js";
 import type { ApiContext } from "../../tools/crud/shared.js";
-import type { InvoiceLine, JournalEntry, Payment, SalesInvoice } from "../types.js";
+import type { InvoiceLine, JournalEntry, Payment, PurchaseInvoice, SalesInvoice } from "../types.js";
 
 function fakeApi(overrides: Record<string, unknown> = {}): { api: ApiContext; spies: Record<string, ReturnType<typeof vi.fn>> } {
   const spies = {
@@ -11,6 +11,9 @@ function fakeApi(overrides: Record<string, unknown> = {}): { api: ApiContext; sp
     journalsCreate: vi.fn(async () => ({ code: 200, created_object_id: 77, messages: [] })),
     saleConfirm: vi.fn(async () => ({ code: 200, messages: [] })),
     txConfirm: vi.fn(async () => ({ code: 200, messages: [] })),
+    txGet: vi.fn(async () => ({ clients_id: null })),
+    txUpdate: vi.fn(async () => ({ code: 200, messages: [] })),
+    createAndSetTotals: vi.fn(async () => ({ id: 601 })),
   };
   const api = {
     readonly: { getAccounts: spies.getAccounts, getSaleArticles: vi.fn(async () => []) },
@@ -18,8 +21,8 @@ function fakeApi(overrides: Record<string, unknown> = {}): { api: ApiContext; sp
     products: { listAll: vi.fn(async () => []) },
     journals: { create: spies.journalsCreate, confirm: vi.fn(), invalidate: vi.fn() },
     saleInvoices: { create: vi.fn(), confirm: spies.saleConfirm, invalidate: vi.fn(), listAll: vi.fn(async () => []) },
-    purchaseInvoices: { create: vi.fn(), confirm: vi.fn(), invalidate: vi.fn(), listAll: vi.fn(async () => []) },
-    transactions: { confirm: spies.txConfirm, invalidate: vi.fn() },
+    purchaseInvoices: { create: vi.fn(), createAndSetTotals: spies.createAndSetTotals, confirm: vi.fn(), invalidate: vi.fn(), listAll: vi.fn(async () => []) },
+    transactions: { confirm: spies.txConfirm, get: spies.txGet, update: spies.txUpdate, invalidate: vi.fn() },
     ...overrides,
   } as unknown as ApiContext;
   return { api, spies };
@@ -117,6 +120,81 @@ describe("EarveldajaAdapter.createSalesInvoice", () => {
     const body = create.mock.calls[0]![0] as Record<string, unknown>;
     expect(body).toMatchObject({ clients_id: 8, cl_templates_id: 3, journal_date: "2026-05-02", create_date: "2026-05-01" });
     expect((body.items as unknown[])).toHaveLength(1);
+  });
+});
+
+describe("linesToPurchaseItems", () => {
+  it("maps common fields and preserves backend extras via raw", () => {
+    const lines: InvoiceLine[] = [{
+      item: { entity: "item", backend: "e-arveldaja", value: "5" },
+      description: "Hosting",
+      quantity: "1",
+      unitPrice: { amount: "20", currency: "EUR" },
+      taxCode: "24%",
+      account: "5120",
+      raw: { cl_purchase_articles_id: 7, vat_accounts_id: 41, total_net_price: 20, vat_rate_dropdown: "24%" },
+    }];
+    expect(linesToPurchaseItems(lines)[0]).toMatchObject({
+      products_id: 5, custom_title: "Hosting", purchase_accounts_id: 5120,
+      cl_purchase_articles_id: 7, vat_accounts_id: 41, total_net_price: 20,
+    });
+  });
+});
+
+describe("postingToEaPosting", () => {
+  it("maps account/type/amount, dimensions, and raw extras", () => {
+    const ea = postingToEaPosting({
+      account: "1360",
+      debit: { amount: "100", currency: "EUR" },
+      dimensions: [{ axis: "account", value: "888" }, { axis: "project", value: "3" }],
+      raw: { base_amount: 92.5 },
+    });
+    expect(ea).toMatchObject({ accounts_id: 1360, type: "D", amount: 100, accounts_dimensions_id: 888, projects_project_id: 3, base_amount: 92.5 });
+  });
+});
+
+describe("EarveldajaAdapter.createPurchaseInvoice", () => {
+  it("uses createAndSetTotals when __setTotals is set, passing vat/gross/isVatReg", async () => {
+    const { api, spies } = fakeApi();
+    const invoice: PurchaseInvoice = {
+      vendor: { entity: "party", backend: "e-arveldaja", value: "8" },
+      vendorBillNo: "INV-9",
+      docDate: "2026-05-01",
+      dueDate: "2026-05-15",
+      currency: "EUR",
+      lines: [{ description: "X", quantity: "1", unitPrice: { amount: "50", currency: "EUR" }, taxCode: "", account: "5120", raw: { cl_purchase_articles_id: 1, total_net_price: 50 } }],
+      raw: { client_name: "Supplier", term_days: 14, liability_accounts_id: 2310, __setTotals: true, __vatPrice: 12, __grossPrice: 62, __isVatReg: true },
+    };
+    const res = await new EarveldajaAdapter(api).createPurchaseInvoice(invoice);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.data.id?.value).toBe("601");
+    const [data, vat, gross, isVatReg] = spies.createAndSetTotals.mock.calls[0]!;
+    expect(vat).toBe(12);
+    expect(gross).toBe(62);
+    expect(isVatReg).toBe(true);
+    expect(data).toMatchObject({ clients_id: 8, client_name: "Supplier", number: "INV-9", term_days: 14 });
+    expect((data as { items: unknown[] }).items).toHaveLength(1);
+    expect((data as Record<string, unknown>).__setTotals).toBeUndefined(); // hint keys stripped
+  });
+});
+
+describe("EarveldajaAdapter.recordPayment (account distribution)", () => {
+  it("maps an account-dimension allocation to related_sub_id and pre-sets clients_id", async () => {
+    const { api, spies } = fakeApi();
+    const payment: Payment = {
+      bank: { entity: "account", backend: "e-arveldaja", value: "" },
+      date: "",
+      amount: { amount: "0", currency: "EUR" },
+      allocations: [{ target: { account: "1360" }, amount: { amount: "50", currency: "EUR" }, dimensions: [{ axis: "account", value: "777" }] }],
+      raw: { transaction_id: 42, clients_id: 9 },
+    };
+    const res = await new EarveldajaAdapter(api).recordPayment(payment);
+    expect(res.ok).toBe(true);
+    expect(spies.txUpdate).toHaveBeenCalledWith(42, { clients_id: 9 });
+    expect(spies.txConfirm).toHaveBeenCalledWith(42, [
+      { related_table: "accounts", related_id: 1360, related_sub_id: 777, amount: 50 },
+    ]);
   });
 });
 

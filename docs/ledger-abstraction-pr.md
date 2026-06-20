@@ -92,22 +92,31 @@ Without Merit credentials the registry exposes only e-arveldaja;
 - Opt-in live smoke test runs read-only Merit calls when `MERIT_API_ID` is set:
   `MERIT_API_ID=… MERIT_API_KEY=… npm run test:integration`.
 
-## Worked migration: `create_sale_invoice`
+## Worked migrations: the write tools
 
-The existing `create_sale_invoice` tool now routes through the port
-(`EarveldajaAdapter.createSalesInvoice`) instead of calling `SaleInvoicesApi`
-directly — the first proof that the abstraction can carry a real tool with no
-behaviour change. The tool's public schema, dimension validation, audit log,
-and final API payload are identical; its items become canonical invoice lines
-and the adapter maps them back to `SaleInvoiceItem` (each line's `raw` preserves
-the exact backend fields, so the round-trip is lossless). The adapter's new
-`linesToSaleItems` mapper also lets the unified `ledger_create_sales_invoice`
-tool build a real e-arveldaja invoice without `raw.items`.
+Four existing write tools now route through the port instead of calling the
+`api/*` clients directly — proof that the abstraction can carry real tools with
+no behaviour change. Each tool's public schema, validation, audit log,
+thrown-error contract, and final API payload are identical:
+
+| Tool | Port method | Notes |
+|---|---|---|
+| `create_sale_invoice` | `createSalesInvoice` | items → canonical lines (`linesToSaleItems`) |
+| `create_purchase_invoice` | `createPurchaseInvoice` | keeps `createAndSetTotals`; vat/gross/VAT-reg ride in `raw` `__`-hints |
+| `create_journal` | `postJournal` | postings → canonical postings (`postingToEaPosting`) |
+| `confirm_transaction` | `recordPayment` | distributions → allocations; tx id + clients_id in `raw` |
+
+Lossless round-trip: each line/posting's `raw` carries the exact original
+backend record, so the adapter reconstructs a byte-identical API payload. The
+canonical mappers also let the unified `ledger_*` tools build real e-arveldaja
+documents without `raw` fallbacks. A new `unwrap()` helper re-throws a port
+failure at the tool boundary so backend errors propagate exactly as the
+pre-migration thrown `HttpError` did (preserving the rollback-then-throw
+contract that `confirm_transaction`'s test asserts).
 
 ## Follow-ups (out of scope here)
 
-- Migrate the remaining write tools (purchase invoices, payments, journals) the
-  same way, then thin the api clients they no longer call directly.
+- Thin the `api/*` clients where the migrated tools were their only callers.
 - Additional adapters (SmartAccounts, SimplBooks) — both fit the `autoPost`
   profile; Directo would exercise the `writeTransport: "separate"` +
   `native()` escape hatch.
