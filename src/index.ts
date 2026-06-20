@@ -50,6 +50,7 @@ import { registerCamtImportTools } from "./tools/camt-import.js";
 import { registerAccountingInboxTools } from "./tools/accounting-inbox.js";
 import { registerAnalyzeUnconfirmedTools } from "./tools/analyze-unconfirmed.js";
 import { registerWorkflowRecommendationTools } from "./tools/workflow-recommendations.js";
+import { registerLedgerTools } from "./tools/ledger-tools.js";
 import { clearConnectionCaches, registerCacheControlTool } from "./cache-control.js";
 import { registerResources } from "./resources/static-resources.js";
 import { registerDynamicResources } from "./resources/dynamic-resources.js";
@@ -988,6 +989,7 @@ async function main() {
   registerAccountingInboxTools(scopedServer, api);
   registerAnalyzeUnconfirmedTools(scopedServer, api);
   registerWorkflowRecommendationTools(scopedServer);
+  registerLedgerTools(scopedServer, api);
 
   // Register resources via scopedServer so reads stay pinned to the selected connection
   registerResources(scopedServer, api);

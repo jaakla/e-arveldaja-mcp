@@ -22,6 +22,28 @@ import {
   tagNotes,
   validateUpdateFields,
 } from "./shared.js";
+import { buildLedgerRegistry } from "../../ledger/registry.js";
+import type { InvoiceLine, SalesInvoice } from "../../ledger/types.js";
+import type { SaleInvoiceItem } from "../../types/api.js";
+
+/**
+ * Map an e-arveldaja-shaped sale item to a canonical InvoiceLine. The common
+ * fields are lifted to canonical positions; the full original item rides in
+ * `raw` so the adapter reconstructs the exact backend payload (lossless).
+ */
+function saleItemToLine(item: SaleInvoiceItem): InvoiceLine {
+  return {
+    item: item.products_id != null
+      ? { entity: "item", backend: "e-arveldaja", value: String(item.products_id) }
+      : undefined,
+    description: item.custom_title,
+    quantity: String(item.amount ?? 1),
+    unitPrice: { amount: String(item.unit_net_price ?? 0), currency: "EUR" },
+    taxCode: "",
+    account: item.sale_accounts_id != null ? String(item.sale_accounts_id) : undefined,
+    raw: item as unknown as Record<string, unknown>,
+  };
+}
 
 export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): void {
   // =====================
@@ -74,28 +96,47 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
     if (dimErrors.length > 0) {
       return toolError({ error: "Account validation failed", details: dimErrors });
     }
-    const result = await api.saleInvoices.create({
-      ...params,
-      number_suffix: params.number_suffix ?? "",
-      cl_currencies_id: params.cl_currencies_id ?? "EUR",
-      cl_countries_id: params.cl_countries_id ?? "EST",
-      sale_invoice_type: params.sale_invoice_type ?? "INVOICE",
-      show_client_balance: params.show_client_balance ?? false,
-      notes: tagNotes(params.notes),
-      items,
-    });
+
+    // Route the create through the LedgerConnector port (e-arveldaja backend).
+    // Invoice-level e-arveldaja fields ride in `raw`; items become canonical
+    // lines that the adapter maps back to SaleInvoiceItem, so this is a worked
+    // example of an existing tool migrated onto the abstraction.
+    const connector = buildLedgerRegistry(api).get("e-arveldaja")!;
+    const invoice: SalesInvoice = {
+      customer: { entity: "party", backend: "e-arveldaja", value: String(params.clients_id) },
+      docDate: params.create_date,
+      dueDate: params.journal_date,
+      currency: params.cl_currencies_id ?? "EUR",
+      number: params.number_suffix ?? "",
+      lines: items.map(saleItemToLine),
+      raw: {
+        cl_templates_id: params.cl_templates_id,
+        number_suffix: params.number_suffix ?? "",
+        journal_date: params.journal_date,
+        term_days: params.term_days,
+        cl_countries_id: params.cl_countries_id ?? "EST",
+        sale_invoice_type: params.sale_invoice_type ?? "INVOICE",
+        show_client_balance: params.show_client_balance ?? false,
+        notes: tagNotes(params.notes),
+      },
+    };
+    const outcome = await connector.createSalesInvoice(invoice);
+    if (!outcome.ok) {
+      return toolError({ error: "Failed to create sale invoice", details: outcome.error });
+    }
+    const createdId = outcome.data.id ? Number(outcome.data.id.value) : undefined;
     logAudit({
       tool: "create_sale_invoice", action: "CREATED", entity_type: "sale_invoice",
-      entity_id: result.created_object_id,
+      entity_id: createdId,
       summary: `Created sale invoice for client ${params.clients_id} on ${params.create_date}`,
       details: { clients_id: params.clients_id, date: params.create_date, items: items.map(i => ({ title: i.custom_title, amount: i.amount })) },
     });
     return toolResponse({
       action: "created",
       entity: "sale_invoice",
-      id: result.created_object_id,
+      id: createdId,
       message: `Created sale invoice for client ${params.clients_id} on ${params.create_date}.`,
-      raw: result,
+      raw: outcome.data,
     });
   });
 

@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, realpathSync, writeFileSync } from "fs";
 import { rm } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -287,7 +287,9 @@ describe("MCP Server Setup Mode", () => {
   let tempDir: string;
 
   beforeAll(async () => {
-    tempDir = mkdtempSync(join(tmpdir(), "earveldaja-mcp-setup-"));
+    // realpathSync so tempDir matches the child server's process.cwd(), which
+    // resolves the macOS /var -> /private/var symlink.
+    tempDir = realpathSync(mkdtempSync(join(tmpdir(), "earveldaja-mcp-setup-")));
     transport = createTransport({
       cwd: tempDir,
       env: buildTransportEnv({

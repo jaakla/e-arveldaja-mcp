@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+- **`create_sale_invoice` now routes through the LedgerConnector port** — the tool's public input schema, dimension validation, audit log, and resulting API payload are unchanged, but the create now goes through `EarveldajaAdapter.createSalesInvoice` instead of calling `SaleInvoicesApi.create` directly. This is the first worked migration of an existing tool onto the abstraction: the tool's items become canonical invoice lines (the adapter maps them back to `SaleInvoiceItem`, with each line's `raw` preserving the exact backend fields), proving the canonical model can carry a real tool with no behaviour change. The adapter gained canonical-line → `SaleInvoiceItem` mapping (`linesToSaleItems`) so the unified `ledger_create_sales_invoice` tool also produces a real e-arveldaja invoice without relying on `raw.items`.
+
+### Added
+- **Multi-backend ledger abstraction (`src/ledger/`) + unified `ledger_*` tools** — an intermediate ports-and-adapters layer that lets the server drive other Estonian bookkeeping systems through one canonical model, **Merit Aktiva** first. A backend-neutral `LedgerConnector` port (with a capability descriptor covering booking model, numbering, dimensions, VAT scope, source-doc requirement, and feature flags) sits over two adapters: an `EarveldajaAdapter` that wraps the existing `ApiContext` api clients (the explicit PROJECT→CONFIRMED booking model, unchanged behaviour), and a `MeritAdapter` (HMAC-SHA256 signing verified against Merit's published test vector; the auto-post booking model where documents post on create and `confirm()` is a no-op). A registry exposes whichever backends are configured. Four new MCP tools — `list_ledger_backends`, `ledger_create_sales_invoice`, `ledger_record_payment`, `ledger_post_journal` — route through the port so an agent can target either backend with one vocabulary. The existing e-arveldaja-specific tools are untouched; the ledger tools are additive. Merit is enabled by setting `MERIT_API_ID` / `MERIT_API_KEY` (and optionally `MERIT_API_COUNTRY=EE|PL`); without them only e-arveldaja is registered. Default backend is selectable via `EARVELDAJA_LEDGER_DEFAULT_BACKEND`. An opt-in live smoke test (`src/__integration__/merit-adapter.integration.test.ts`) runs read-only Merit calls when credentials are present. See `ARCHITECTURE.md` → "Ledger abstraction layer".
+
 ## [0.17.0] - 2026-06-17
 
 ### Added
