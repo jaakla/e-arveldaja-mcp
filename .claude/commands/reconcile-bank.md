@@ -4,6 +4,8 @@
 
 Match unconfirmed bank transactions to open invoices and confirm the matches.
 
+**Backend: e-arveldaja only.** This workflow drives bank-transaction/invoice matching and confirmation, which other ledger backends do not expose. In a ledger session (e-arveldaja unconfigured), tell the user it needs e-arveldaja credentials and stop — do not improvise an equivalent with `ledger_*` tools.
+
 Start by showing matches. Nothing is confirmed, deleted, or journalized until the user approves the exact action.
 
 **Input:** One of:

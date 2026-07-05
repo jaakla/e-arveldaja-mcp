@@ -63,7 +63,8 @@ flowchart TB
 - Do not assume e-arveldaja is the only accounting backend.
 - Most native tools are e-arveldaja-specific; `src/ledger/` is the backend-neutral surface.
 - Treat workflow prompt names as business intents, not proof of backend portability. Read the workflow source to see whether the current recipe calls native tools or `ledger_*`.
-- Existing workflow recipes are not ledger-abstracted. Cross-backend workflows should either use `ledger_*` directly or add a backend-aware recipe that starts with `list_ledger_backends` and respects connector `capabilities`.
+- Three recipes are backend-aware (`book-invoice`, `new-supplier`, `company-overview`): each opens with a Step 0 that routes to a ledger branch on non-e-arveldaja backends, and in a ledger session these prompts serve their runbook instead of the setup-mode text. The rest declare **Backend: e-arveldaja only** up front and must not be improvised onto other backends with `ledger_*` tools.
+- New cross-backend workflows should follow the same pattern: start with `list_ledger_backends` and respect connector `capabilities`.
 - New cross-backend accounting behaviour should prefer the `LedgerConnector` port when the capability belongs in more than one backend.
 - Each ledger connector declares its real `capabilities`; callers should discover support instead of assuming hidden parity.
 - Mutating workflows must preserve dry-run defaults, explicit approval, audit logging, path validation, and untrusted-text sandboxing.
@@ -79,9 +80,9 @@ backend recipe.
 |---|---|---|---|
 | Setup | `setup-credentials`, `setup-e-arveldaja` | Configure API access | e-arveldaja-specific |
 | Inbox and review orchestration | `accounting-inbox`, `resolve-accounting-review`, `prepare-accounting-review-action` | Triage accounting inputs and review items | Native workflow tools such as `accounting_inbox` and `continue_accounting_workflow` |
-| Purchase and supplier entry | `book-invoice`, `receipt-batch`, `new-supplier` | Universal bookkeeping intents: enter supplier, receipt, and purchase invoice data safely | Native e-arveldaja tools for OCR, duplicate checks, supplier resolution, purchase invoices, attachments, and confirmation |
+| Purchase and supplier entry | `book-invoice`, `receipt-batch`, `new-supplier` | Universal bookkeeping intents: enter supplier, receipt, and purchase invoice data safely | `book-invoice` and `new-supplier` are backend-aware (Step 0 routes to `ledger_*` on non-e-arveldaja backends; local OCR still applies); `receipt-batch` is e-arveldaja-only |
 | Bank import and reconciliation | `import-camt`, `import-wise`, `classify-unmatched`, `reconcile-bank` | Mostly universal cash-management intents, with CAMT/Wise source-specific input handling | Native e-arveldaja bank transaction, account-dimension, PROJECT, confirmation, and inter-account-transfer tools |
-| Reporting and close | `company-overview`, `month-end-close` | Universal reporting and period-close intents | Native e-arveldaja reporting/checklist tools; `ledger` reporting capabilities are declared but not exposed as tools yet |
+| Reporting and close | `company-overview`, `month-end-close` | Universal reporting and period-close intents | `company-overview` is backend-aware (lighter `ledger_list_*` overview on other backends; port reporting is declared but not exposed as tools yet); `month-end-close` is e-arveldaja-only |
 | Investment booking | `lightyear-booking` | Source-specific investment accounting workflow | Native journal/import helpers with explicit account numbers and dimensions |
 
 For new prompts, keep the user-facing intent stable and put backend dependence

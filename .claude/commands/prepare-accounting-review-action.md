@@ -4,6 +4,8 @@
 
 Turn a resolved accounting review item into the next concrete action, such as cleaning up a duplicate transaction or saving a stable auto-booking rule.
 
+**Backend: e-arveldaja only.** This workflow drives the continue_accounting_workflow action preparer, which other ledger backends do not expose. In a ledger session (e-arveldaja unconfigured), tell the user it needs e-arveldaja credentials and stop — do not improvise an equivalent with `ledger_*` tools.
+
 ## Arguments
 
 - `review_item_json`: JSON object from `autopilot.needs_accountant_review[*].resolver_input` or a direct review item payload

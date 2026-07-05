@@ -1,8 +1,23 @@
 # Book Purchase Invoice from Document
 
-Book a purchase invoice from a source document. Extract the data, validate it, resolve the supplier safely, check duplicate risk, preview the booking, then create the invoice, upload the document, and confirm it after approval.
+Book a purchase invoice from a source document. Extract the data, validate it, resolve the supplier safely, check duplicate risk, preview the booking, then create the invoice, upload the document, and confirm it after approval. The intent is backend-neutral; the default recipe targets e-arveldaja, with a ledger-port branch for any other configured backend.
 
 **Input:** Absolute path to the invoice document (`.pdf`, `.jpg`, `.jpeg`, `.png`).
+
+## Step 0: Choose the backend
+
+Default to e-arveldaja when it is configured. Switch to the **ledger branch** below when the user names another backend (e.g. Merit) or the session is a ledger session (e-arveldaja unconfigured but a ledger backend available — check `list_ledger_backends` when unsure).
+
+### Ledger branch (any non-e-arveldaja backend)
+
+Document extraction is local, so Steps 2–3 apply unchanged (`extract_pdf_invoice`, `validate_invoice_data`, and all of their untrusted-text rules). Then:
+
+1. **Duplicate check:** call `ledger_list_purchase_invoices` with the target `backend` for a window around the invoice date. A row with the same `vendorBillNo` for the same vendor is a duplicate — stop and show it. (Auto-post backends post on create, so a duplicate cannot be quietly voided afterwards.)
+2. **Vendor:** call `ledger_list_parties` and match the extracted supplier by regCode, else by name. No match → include "create vendor" in the approval card and create it with `ledger_upsert_party` (`kind: "vendor"`) after approval.
+3. **Accounts and VAT:** pick the expense account from `ledger_list_accounts` and the tax code from `ledger_list_tax_rates` (match the invoice's VAT rate to `ratePct`). Ask the user when the account choice is not obvious — there is no booking-history suggestion on this path.
+4. **One approval card** (same contract as Step 10): supplier, invoice number, dates, net/VAT/gross, chosen account and tax code, duplicate-check result, and the side effect — on an auto-post backend the invoice **posts immediately on create; there is no separate confirm step and no draft to fix afterwards**.
+5. After approval, call `ledger_create_purchase_invoice` with the canonical invoice: `vendor` (Ref or `{name, regCode}`), `vendorBillNo`, `docDate`, `dueDate`, `currency`, `lines[]` (`description`, `quantity`, `unitPrice`, `taxCode`, `account`), and the source document as `sourceDocument` (`filename`, `mimeType`, `contentBase64`) so the backend stores the attachment.
+6. Report the created ref and stop — the remaining steps below are the e-arveldaja recipe.
 
 ## User-facing flow
 

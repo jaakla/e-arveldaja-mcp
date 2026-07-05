@@ -101,9 +101,13 @@ function registerWorkflowPromptWithoutArgs(
 
 export function registerPrompts(
   server: McpServer,
-  options: { setupInfo?: CredentialSetupInfo } = {},
+  options: { setupInfo?: CredentialSetupInfo; ledgerSession?: boolean } = {},
 ): void {
   const setupInfo = options.setupInfo;
+  // In a ledger session (e-arveldaja unconfigured, another ledger backend
+  // configured) the backend-neutral workflows must serve their real runbook —
+  // their Step 0 routes to the ledger branch — instead of the setup-mode text.
+  const gateUnlessLedgerSession = options.ledgerSession ? undefined : setupInfo;
 
   registerWorkflowPrompt(
     server,
@@ -157,9 +161,9 @@ export function registerPrompts(
 
   registerWorkflowPrompt(
     server,
-    setupInfo,
+    gateUnlessLedgerSession,
     "book-invoice",
-    "Book a purchase invoice from a source document. Extracts invoice data, validates it, resolves the supplier, suggests booking accounts, previews the booking, and creates + confirms the invoice after approval.",
+    "Book a purchase invoice from a source document. Extracts invoice data, validates it, resolves the supplier, suggests booking accounts, previews the booking, and creates + confirms the invoice after approval. Backend-neutral: targets e-arveldaja by default or any configured ledger backend (e.g. Merit) through the ledger_* tools.",
     { file_path: z.string().describe("Absolute path to the invoice document file (PDF/JPG/PNG)") },
     {
       offlineTools: ["extract_pdf_invoice", "validate_invoice_data"],
@@ -261,9 +265,9 @@ export function registerPrompts(
 
   registerWorkflowPrompt(
     server,
-    setupInfo,
+    gateUnlessLedgerSession,
     "new-supplier",
-    "Create a new supplier by looking up registry data and creating a client record.",
+    "Create a new supplier by looking up registry data and creating a client record. Backend-neutral: targets e-arveldaja by default or any configured ledger backend via ledger_upsert_party.",
     { identifier: z.string().describe("Supplier name or 8-digit Estonian registry code") },
     {
       note: "Existing-client lookup, supplier resolution, and client creation are API-backed steps, so this workflow cannot complete before credentials are configured.",
@@ -272,9 +276,9 @@ export function registerPrompts(
 
   registerWorkflowPromptWithoutArgs(
     server,
-    setupInfo,
+    gateUnlessLedgerSession,
     "company-overview",
-    "Get a comprehensive dashboard overview of the company's current financial state.",
+    "Get a comprehensive dashboard overview of the company's current financial state. On a non-e-arveldaja ledger backend (e.g. Merit) it produces a lighter list-based overview instead of full statements.",
     {
       note: "This dashboard depends on live company settings and financial reports from e-arveldaja, so it cannot run before credentials are configured.",
     },

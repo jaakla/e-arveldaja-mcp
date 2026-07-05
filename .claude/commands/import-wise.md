@@ -4,6 +4,8 @@
 
 Preview Wise transaction import results, including fee rows and skipped duplicates, before creating anything.
 
+**Backend: e-arveldaja only.** This workflow drives Wise CSV import and its inter-account duplicate detection, which other ledger backends do not expose. In a ledger session (e-arveldaja unconfigured), tell the user it needs e-arveldaja credentials and stop — do not improvise an equivalent with `ledger_*` tools.
+
 User-facing phases:
 1. Preview the Wise CSV import.
 2. Resolve fee-dimension or transfer questions only when needed.

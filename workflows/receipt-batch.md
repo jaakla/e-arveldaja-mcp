@@ -2,6 +2,8 @@
 
 Scan a folder of receipts, preview what can be auto-booked, and only create purchase invoices after approval.
 
+**Backend: e-arveldaja only.** This workflow drives receipt OCR batch booking, supplier resolution, and bank matching, which other ledger backends do not expose. In a ledger session (e-arveldaja unconfigured), tell the user it needs e-arveldaja credentials and stop — do not improvise an equivalent with `ledger_*` tools.
+
 User-facing phases:
 1. Scan the folder.
 2. Preview auto-bookable receipts, duplicates, review items, and errors.

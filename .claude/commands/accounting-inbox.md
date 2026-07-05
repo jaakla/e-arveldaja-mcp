@@ -4,6 +4,8 @@
 
 Start from one workspace-level scan, propose only the next safe dry-run steps, and ask the fewest possible follow-up questions.
 
+**Backend: e-arveldaja only.** This workflow drives the accounting_inbox scanner, dry-run autopilot, and review queue, which other ledger backends do not expose. In a ledger session (e-arveldaja unconfigured), tell the user it needs e-arveldaja credentials and stop — do not improvise an equivalent with `ledger_*` tools.
+
 ## Arguments
 
 - Optional `workspace_path`: folder to scan for CAMT statements, Wise CSV files, and receipt folders

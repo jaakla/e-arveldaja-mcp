@@ -4,6 +4,8 @@
 
 Take one accounting review item and turn it into the next concrete step with the fewest possible user questions.
 
+**Backend: e-arveldaja only.** This workflow drives the continue_accounting_workflow review resolver, which other ledger backends do not expose. In a ledger session (e-arveldaja unconfigured), tell the user it needs e-arveldaja credentials and stop — do not improvise an equivalent with `ledger_*` tools.
+
 ## Arguments
 
 - `review_item_json`: JSON object from `autopilot.needs_accountant_review[*].resolver_input` or a direct review item payload

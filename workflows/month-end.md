@@ -2,6 +2,8 @@
 
 Run the month-end close checklist, compute financial statements, and flag issues.
 
+**Backend: e-arveldaja only.** This workflow drives the month-end checklist, document audit, and financial statements, which other ledger backends do not expose. In a ledger session (e-arveldaja unconfigured), tell the user it needs e-arveldaja credentials and stop — do not improvise an equivalent with `ledger_*` tools.
+
 **Input:** Month in YYYY-MM format (e.g. `2026-02`).
 
 User-facing phases:

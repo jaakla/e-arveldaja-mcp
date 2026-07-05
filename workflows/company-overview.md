@@ -1,8 +1,22 @@
 # Company Overview
 
-Prepare a compact financial overview for the active e-arveldaja connection.
+Prepare a compact financial overview for the active company. The full dashboard needs e-arveldaja's reporting tools; other ledger backends get a lighter read-only overview.
 
 This workflow is read-only. It should feel like a dashboard, not a ledger export.
+
+## Step 0: Choose the backend
+
+Default to e-arveldaja when it is configured. Switch to the **ledger branch** when the user names another backend or the session is a ledger session (check `list_ledger_backends` when unsure).
+
+### Ledger branch (any non-e-arveldaja backend)
+
+Backend-neutral reporting (`trialBalance` / `incomeStatement`) is not exposed as tools yet, so build a lighter overview from the list reads, all with the target `backend`:
+
+1. `ledger_list_sales_invoices` and `ledger_list_purchase_invoices` for the selected period (both default to the last ~90 days; Merit caps queries at ~3 months — for a longer period, page through in ~90-day windows).
+2. Summarize: sales volume and count, purchase volume and count, unpaid/partial invoices on each side (the canonical `settle` field), and anything overdue by `dueDate`.
+3. State clearly that balance-sheet and P&L figures are not available through this backend's port yet, and name the backend in the summary.
+
+Then stop — the remaining steps are the e-arveldaja recipe.
 
 ## Period selection
 

@@ -2,6 +2,8 @@
 
 Inspect the current credential setup, import credentials from an `apikey*.txt` file when available, and explain the required restart and next steps.
 
+**Scope: e-arveldaja credentials only.** Other ledger backends use their own env vars (Merit Aktiva: `MERIT_API_ID` / `MERIT_API_KEY`); see `list_ledger_backends`.
+
 ## Arguments
 
 - Optional `file_path`: absolute path to an `apikey*.txt` file to import

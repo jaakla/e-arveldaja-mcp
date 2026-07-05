@@ -2,6 +2,8 @@
 
 Explain how to configure e-arveldaja MCP credentials for the current working directory.
 
+**Scope: e-arveldaja credentials only.** Other ledger backends are configured separately through environment variables (Merit Aktiva: `MERIT_API_ID`, `MERIT_API_KEY`, optional `MERIT_API_COUNTRY=EE|PL`) — check `list_ledger_backends` for what is configured. The server can also run Merit-only, without e-arveldaja credentials, as a ledger session.
+
 For actual importing, prefer the `setup-credentials` workflow because it covers storage scope, append/overwrite behavior, removal, and restart verification.
 
 Follow these steps:

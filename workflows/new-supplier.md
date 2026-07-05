@@ -1,8 +1,20 @@
 # Create New Supplier
 
-Create a new supplier (client) in e-arveldaja with proper fields and optional business registry lookup.
+Create a new supplier with proper fields and optional business registry lookup. The intent is backend-neutral; the default recipe targets e-arveldaja, with a ledger-port branch for any other configured backend.
 
 **Input:** Supplier name or Estonian registry code (8 digits).
+
+## Step 0: Choose the backend
+
+Default to e-arveldaja when it is configured. Switch to the **ledger branch** below when the user names another backend (e.g. Merit) or the session is a ledger session (e-arveldaja unconfigured but a ledger backend available — check `list_ledger_backends` when unsure).
+
+### Ledger branch (any non-e-arveldaja backend)
+
+1. Duplicate check: call `ledger_list_parties` with the target `backend` and look for a party whose name or regCode matches. A regCode hit is authoritative — show it and stop. A name hit is a candidate — confirm with the user first.
+2. Gather details as in Step 4 below (IBAN, VAT number, email). There is no registry lookup on this path — ask the user to confirm the official name and registry code.
+3. Show the Step 5 approval card (side effect: create one **vendor** record on the named backend).
+4. After approval, call `ledger_upsert_party` with the `backend` and a canonical Party: `kind: "vendor"`, `name`, `regCode`, `vatNumber`, `email`, `iban`.
+5. Report the created party's ref and stop — the remaining steps below are the e-arveldaja recipe.
 
 ## Step 1: Determine input type
 
@@ -62,7 +74,7 @@ Call `create_client`:
 - `is_client`: `false`
 - `is_supplier`: `true`
 - `cl_code_country`: `"EST"` (or as specified)
-- `is_juridical_entity`: `true` (default; `false` for natural persons)
+- `is_physical_entity`: `false` (legal entity; `true` for natural persons — required)
 - `bank_account_no`: IBAN (if provided)
 - `invoice_vat_no`: VAT number (if provided)
 - `email`: (if provided)

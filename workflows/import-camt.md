@@ -2,6 +2,8 @@
 
 Parse a CAMT.053 statement, preview the import, and only create bank transactions after approval.
 
+**Backend: e-arveldaja only.** This workflow drives CAMT statement import and PROJECT bank-transaction creation, which other ledger backends do not expose. In a ledger session (e-arveldaja unconfigured), tell the user it needs e-arveldaja credentials and stop — do not improvise an equivalent with `ledger_*` tools.
+
 User-facing phases:
 1. Parse the statement.
 2. Preview creates, skips, and possible duplicates.

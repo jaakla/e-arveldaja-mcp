@@ -1017,7 +1017,7 @@ async function main() {
   registerAccountingKnowledgeResources(scopedServer);
 
   // Register prompts
-  registerPrompts(server, { setupInfo: setupMode ? setupInfo : undefined });
+  registerPrompts(server, { setupInfo: setupMode ? setupInfo : undefined, ledgerSession: ledgerOnlySession });
 
   // Start server
   const transport = new StdioServerTransport();

@@ -2,6 +2,8 @@
 
 Book Lightyear investment activity from CSV exports after explicit dry-run review.
 
+**Backend: e-arveldaja only.** This workflow drives Lightyear CSV parsing and journal booking with LY: duplicate keys, which other ledger backends do not expose. In a ledger session (e-arveldaja unconfigured), tell the user it needs e-arveldaja credentials and stop — do not improvise an equivalent with `ledger_*` tools.
+
 User-facing phases:
 1. Parse statements and required capital-gains files.
 2. Show accounting carrying value / cost basis.
