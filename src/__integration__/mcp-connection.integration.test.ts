@@ -476,6 +476,99 @@ describe("MCP Server Startup Credential Import", () => {
   });
 });
 
+describe("MCP Server Ledger Session (Merit configured, no e-arveldaja)", () => {
+  let client: Client;
+  let transport: StdioClientTransport;
+  let tempDir: string;
+
+  const LEDGER_TOOLS = [
+    "list_ledger_backends",
+    "ledger_list_accounts",
+    "ledger_list_tax_rates",
+    "ledger_list_parties",
+    "ledger_list_items",
+    "ledger_list_sales_invoices",
+    "ledger_list_purchase_invoices",
+    "ledger_create_sales_invoice",
+    "ledger_create_purchase_invoice",
+    "ledger_record_payment",
+    "ledger_post_journal",
+    "ledger_confirm",
+    "ledger_void",
+  ];
+
+  beforeAll(async () => {
+    tempDir = realpathSync(mkdtempSync(join(tmpdir(), "earveldaja-mcp-ledger-session-")));
+    transport = createTransport({
+      cwd: tempDir,
+      env: buildTransportEnv({
+        // No e-arveldaja credentials → the server boots in e-arveldaja setup mode...
+        EARVELDAJA_API_KEY_ID: "",
+        EARVELDAJA_API_PUBLIC_VALUE: "",
+        EARVELDAJA_API_PASSWORD: "",
+        EARVELDAJA_API_KEY_FILE: "",
+        EARVELDAJA_CONFIG_DIR: join(tempDir, "global"),
+        // ...but Merit IS configured → it boots as a ledger session. Fake creds:
+        // no Merit API is contacted by these assertions (only list_ledger_backends,
+        // which is pure, and tool/instruction discovery).
+        MERIT_API_ID: "integration-merit-id",
+        MERIT_API_KEY: "integration-merit-key",
+        MERIT_API_COUNTRY: "EE",
+      }, { inheritEarveldaja: false }),
+    });
+    client = new Client({ name: "ledger-session-test", version: "1.0.0" });
+    await client.connect(transport);
+  });
+
+  afterAll(async () => {
+    try { await client.close(); } catch {}
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("registers all ledger_* tools", async () => {
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name)).toEqual(expect.arrayContaining(LEDGER_TOOLS));
+  });
+
+  it("list_ledger_backends reports Merit as the configured default and e-arveldaja as unconfigured", async () => {
+    const result = await client.callTool({ name: "list_ledger_backends", arguments: {} });
+    const data = parseMcpResponse((result.content as any)[0].text) as {
+      default: string;
+      backends: Array<{ backendId: string; configured: boolean; isDefault: boolean; note?: string }>;
+    };
+
+    expect(result.isError).toBeFalsy();
+    expect(data.default).toBe("merit");
+
+    const earveldaja = data.backends.find((b) => b.backendId === "e-arveldaja")!;
+    expect(earveldaja.configured).toBe(false);
+    expect(earveldaja.isDefault).toBe(false);
+
+    const merit = data.backends.find((b) => b.backendId === "merit")!;
+    expect(merit.configured).toBe(true);
+    expect(merit.isDefault).toBe(true);
+  });
+
+  it("still runs e-arveldaja in setup mode alongside the ledger session", async () => {
+    const setup = await client.callTool({ name: "get_setup_instructions", arguments: {} });
+    const setupData = parseMcpResponse((setup.content as any)[0].text);
+    expect(setupData.mode).toBe("setup");
+
+    // An e-arveldaja-specific API tool is still blocked without credentials.
+    const blocked = await client.callTool({ name: "get_vat_info", arguments: {} });
+    expect(blocked.isError).toBe(true);
+    expect(parseMcpResponse((blocked.content as any)[0].text).error).toContain("setup mode");
+  });
+
+  it("advertises the ledger session in the server instructions", async () => {
+    const getInstructions = (client as unknown as { getInstructions?: () => string | undefined }).getInstructions;
+    if (typeof getInstructions !== "function") return; // older SDK without instruction passthrough
+    const instructions = getInstructions.call(client) ?? "";
+    expect(instructions).toContain("Ledger session active");
+    expect(instructions).toContain("Merit Aktiva");
+  });
+});
+
 describe.skipIf(!RUN_LIVE_INTEGRATION)("Live API MCP Integration", () => {
   let client: Client;
   let transport: StdioClientTransport;

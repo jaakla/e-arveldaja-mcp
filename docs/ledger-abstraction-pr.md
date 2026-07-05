@@ -4,14 +4,30 @@
 
 Adds an intermediate **ports-and-adapters** layer (`src/ledger/`) so this
 server can drive other Estonian bookkeeping systems through one canonical
-model, with **Merit Aktiva** as the first additional backend. A small set of
-unified `ledger_*` MCP tools route through the new port. The existing
-e-arveldaja-specific tools, api clients, cache, auth, and audit log are
-**untouched** — this PR is purely additive.
+model, with **Merit Aktiva** as the first additional backend. The branch
+landed in three waves:
 
-This is the "foundation + unified tools" scope: it proves both backends satisfy
-one port and gives an agent a cross-backend surface, without rewiring the 133
-existing tools (that migration can follow incrementally).
+1. **Foundation + first unified tools** — the `LedgerConnector` port,
+   canonical types, `Result` envelope, registry, both adapters, and the first
+   four `ledger_*` tools (`list_ledger_backends`,
+   `ledger_create_sales_invoice`, `ledger_record_payment`,
+   `ledger_post_journal`). Purely additive.
+2. **Write-tool migration** — the four existing e-arveldaja write tools
+   (`create_sale_invoice`, `create_purchase_invoice`, `create_journal`,
+   `confirm_transaction`) now route through the `EarveldajaAdapter` with
+   unchanged public behaviour (see "Worked migrations" below).
+3. **Merit-only ledger session + full CRUD surface** — six `ledger_list_*`
+   read tools, `ledger_create_purchase_invoice`, `ledger_confirm`,
+   `ledger_void` (13 `ledger_*` tools total), honest credential reporting in
+   discovery, default-backend fallback to the first configured backend, and a
+   "ledger session" boot mode so the server is usable with Merit credentials
+   and **no** e-arveldaja credentials. Supporting change: OCR
+   (`@llamaindex/liteparse`) is now loaded lazily so a missing native binary
+   no longer prevents boot on platforms Merit-only sessions may run on.
+
+The 13 `ledger_*` tools plus 133 e-arveldaja tools put the default surface at
+146. The remaining ~129 e-arveldaja tools and all workflow prompts stay
+e-arveldaja-specific by design.
 
 ## Why
 
@@ -40,10 +56,15 @@ src/ledger/
     http.ts                    POST-with-body transport, query-param auth
     config.ts                  MERIT_API_ID/KEY/COUNTRY → MeritConfig
     adapter.ts                 canonical ↔ Merit JSON (auto-post booking)
-src/tools/ledger-tools.ts      list_ledger_backends, ledger_create_sales_invoice,
-                               ledger_record_payment, ledger_post_journal
-src/index.ts                   + registerLedgerTools(scopedServer, api)  (1 line)
+src/tools/ledger-tools.ts      the 13 ledger_* tools: list_ledger_backends,
+                               6 ledger_list_* reads, 4 writes (sales/purchase
+                               invoice, payment, journal), confirm + void
+src/index.ts                   registerLedgerTools + the ledger-session boot
+                               path (ledgerOnlySession: banner + instructions
+                               when only a non-e-arveldaja backend is configured)
 src/__integration__/merit-adapter.integration.test.ts   opt-in live smoke test
+src/__integration__/mcp-connection.integration.test.ts  + Merit-only ledger-
+                               session suite (tool exposure, honest discovery)
 ```
 
 ### The booking seam
@@ -73,6 +94,15 @@ what each backend supports — and whether Merit is configured at all.
 Without Merit credentials the registry exposes only e-arveldaja;
 `list_ledger_backends` reports Merit as available-but-unconfigured.
 
+Default-backend resolution for unqualified `ledger_*` calls:
+`EARVELDAJA_LEDGER_DEFAULT_BACKEND` if it names a registered backend, else
+e-arveldaja if it has credentials, else the first other configured backend,
+else e-arveldaja as a last resort. Discovery reports e-arveldaja's *real*
+credential state, so in a Merit-only setup the server boots as a **ledger
+session**: Merit is the default, the `ledger_*` tools work against it, and
+the e-arveldaja-specific tools stay in setup mode until credentials are
+added.
+
 ## Safety & conventions
 
 - Adapters never throw across the port boundary — everything returns `Result`.
@@ -84,13 +114,18 @@ Without Merit credentials the registry exposes only e-arveldaja;
 ## Testing
 
 - `npx tsc --noEmit` — clean (0 errors).
-- `npx vitest run src/ledger` — 21 new unit tests pass (signer vector, both
-  adapters, registry).
-- Full suite: 1193 tests pass. (5 unrelated test *files* fail to load on
-  linux-arm64 due to a pre-existing native-module dependency in
-  `document-parser.ts`; unaffected by this PR and green on supported platforms.)
+- `npx vitest run src/ledger` — unit tests cover the signer vector, both
+  adapters, and the registry (including honest-discovery and Merit-only
+  default resolution).
+- Full suite: 1350/1352 tests pass; the 2 failures are pre-existing on
+  `master` and environment-specific (macOS `/var` symlink resolution, an
+  accounting-inbox snapshot), unrelated to this branch. The former
+  linux-arm64 test-file load failures are fixed by the lazy OCR loading in
+  this branch.
 - Opt-in live smoke test runs read-only Merit calls when `MERIT_API_ID` is set:
-  `MERIT_API_ID=… MERIT_API_KEY=… npm run test:integration`.
+  `MERIT_API_ID=… MERIT_API_KEY=… npm run test:integration`. The MCP
+  integration suite also has a Merit-only ledger-session block (needs only
+  Merit credentials).
 
 ## Worked migrations: the write tools
 
@@ -116,6 +151,19 @@ contract that `confirm_transaction`'s test asserts).
 
 ## Follow-ups (out of scope here)
 
+- **Audit logging for the mutating `ledger_*` tools** — the four migrated
+  e-arveldaja write tools kept their tool-level audit entries, but
+  `ledger_create_*` / `ledger_record_payment` / `ledger_post_journal` /
+  `ledger_confirm` / `ledger_void` do not yet write `logs/*.audit.md`.
+- **Merit transport hardening** — rate limiting and a retry on 429/network,
+  matching the e-arveldaja `HttpClient` posture (`fromThrown` already marks
+  those errors `retryable`).
+- **Expose more of the port** — `ledger_upsert_party` (both adapters already
+  implement `upsertParty`); Merit `trialBalance` / `incomeStatement`; Merit's
+  `deliverByEInvoice` / `deliverByEmail` mixin.
+- **Per-company backend binding** — connections each pointing at their own
+  backend, instead of one env-configured Merit next to the e-arveldaja
+  connection set.
 - Thin the `api/*` clients where the migrated tools were their only callers.
 - Additional adapters (SmartAccounts, SimplBooks) — both fit the `autoPost`
   profile; Directo would exercise the `writeTransport: "separate"` +

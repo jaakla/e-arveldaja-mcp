@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/e-arveldaja-mcp)](https://www.npmjs.com/package/e-arveldaja-mcp)
 
-MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 133 tools, 15 workflow prompts, 13 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
+MCP server for Estonian cloud bookkeeping. e-arveldaja (RIK e-Financials) is the native backend with full coverage — 133 e-arveldaja tools, 15 workflow prompts, 13 resources — and a pluggable **ledger layer** lets the same canonical accounting operations target other Estonian systems too, **Merit Aktiva** today, through thirteen backend-neutral `ledger_*` tools (discovery + reads + writes + lifecycle). Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others. See [Backends](#backends).
 
 > **Safer CAMT re-imports.** `import_camt053` preserves CAMT bank-reference and counterparty-account metadata in the writable transaction description when the e-arveldaja API drops the dedicated fields. Long bank references are stored as stable hashes, marker-only prior imports still surface in duplicate review when the exact key does not match, and repeated CAMT imports are less likely to create duplicate PROJECT rows. See the [changelog](CHANGELOG.md) for full details.
 >
@@ -161,6 +161,30 @@ The server includes 15 built-in workflow prompts that any MCP client can discove
 | `setup-e-arveldaja` | Explain how to configure API credentials when running in setup mode |
 
 **Claude Code** also has these as slash commands: `/accounting-inbox`, `/resolve-accounting-review`, `/prepare-accounting-review-action`, `/book-invoice`, `/receipt-batch`, `/import-camt`, `/import-wise`, `/classify-unmatched`, `/reconcile-bank`, `/month-end`, `/new-supplier`, `/company-overview`, `/lightyear-booking`, `/setup-credentials`, `/setup-e-arveldaja`.
+
+These workflows and most of the 133 tools are **e-arveldaja-specific** — they use e-arveldaja features (CAMT import, Wise/Lightyear booking, the PROJECT→CONFIRMED registration lifecycle) and only run against e-arveldaja. The cross-backend surface is the `ledger_*` tools described next.
+
+## Backends
+
+The server has a backend-neutral **ledger layer** (`src/ledger/`) so accounting operations can run against more than one Estonian bookkeeping system. Each backend is a connector behind one `LedgerConnector` port; backends differ in their *booking model* and *capabilities*, and those differences are declared rather than hidden:
+
+| Backend | Status | Booking model | Numbering | Config |
+|---|---|---|---|---|
+| **e-arveldaja** (RIK) | native, full tool coverage | explicit (PROJECT → CONFIRMED → VOID) | series-managed | `apikey*.txt` / `.env` (see above) |
+| **Merit Aktiva** | via the ledger layer | auto-post (documents post on create) | caller-assigned | `MERIT_API_ID`, `MERIT_API_KEY`, optional `MERIT_API_COUNTRY=EE\|PL` |
+
+Thirteen MCP tools speak this common layer and accept a `backend` argument so an agent can target either system with one vocabulary:
+
+- **Discovery:** `list_ledger_backends` — which backends are configured, which is the default, and each one's capabilities (booking model, numbering, dimensions, VAT scope, features). **Call this first.**
+- **Reads:** `ledger_list_accounts`, `ledger_list_tax_rates`, `ledger_list_parties`, `ledger_list_items`, `ledger_list_sales_invoices`, `ledger_list_purchase_invoices`.
+- **Writes:** `ledger_create_sales_invoice`, `ledger_create_purchase_invoice`, `ledger_record_payment`, `ledger_post_journal`.
+- **Lifecycle:** `ledger_confirm`, `ledger_void` (on an auto-post backend like Merit, `ledger_confirm` is a no-op and `ledger_void` deletes; on e-arveldaja they register / invalidate).
+
+Merit is registered only when `MERIT_API_ID` / `MERIT_API_KEY` are set; otherwise only e-arveldaja is available. The default target for the `ledger_*` tools is `EARVELDAJA_LEDGER_DEFAULT_BACKEND` if set, else the configured host backend. The four migrated write tools (`create_sale_invoice`, `create_purchase_invoice`, `create_journal`, `confirm_transaction`) also route through this layer against e-arveldaja, with unchanged behaviour. See [ARCHITECTURE.md](ARCHITECTURE.md) → "Ledger abstraction layer".
+
+### Running a non-e-arveldaja backend (e.g. Merit only)
+
+You can run with Merit configured and **no** e-arveldaja credentials. The server boots as a **ledger session**: it reports that e-arveldaja is unconfigured (so the 133 e-arveldaja-specific tools need credentials) but that Merit is available, and the `ledger_*` tools work against Merit. Because no host backend is configured, Merit becomes the **default**, so unqualified `ledger_*` calls route to it, and `list_ledger_backends` honestly reports e-arveldaja as unconfigured. What you get this way is the full cross-backend surface above — discovery, six reads, four writes, and confirm/void — enough to create and read back invoices, payments, and journals and manage their lifecycle. Per-company backend binding (each connection pointing at its own system) is the direction this is built toward, not yet a finished feature.
 
 ## Usage Examples
 
@@ -343,19 +367,20 @@ curl "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.ise
 - **Large datasets need date filters.** The server loads up to 200 pages of data per query. Companies with thousands of invoices or transactions should narrow reporting and reconciliation tools with date ranges — otherwise the tool will ask you to.
 - **Caching.** API responses are cached for 2–5 minutes and reference data for up to 10 minutes. The server automatically invalidates caches when you create, update, or delete records through MCP tools. Changes made directly in the e-arveldaja web UI are not visible until the cache expires; call `clear_cache` or pass `fresh: true` to balance/reporting tools when you need the next read to fetch current upstream data.
 - **EUR by default.** All amounts are EUR unless a different currency is specified.
-- **Multi-company.** Place multiple `apikey*.txt` files and use `list_connections` / `switch_connection`. Switching clears the previous and target connections' cached data, so one company's records are never served to another.
+- **Multi-company.** Place multiple `apikey*.txt` files and use `list_connections` / `switch_connection`. Switching clears the previous and target connections' cached data, so one company's records are never served to another. These connections are all e-arveldaja companies; targeting a *different* bookkeeping system (e.g. Merit Aktiva) goes through the [ledger layer](#backends) and its `ledger_*` tools rather than `switch_connection`.
 - **Node.js 18+** required.
 - **File access scope.** By default, file-reading tools can access supported files under the working directory and `/tmp`. Set `EARVELDAJA_ALLOWED_PATHS` (colon-separated) to allow additional directories, or `EARVELDAJA_ALLOW_HOME=true` to allow the entire home directory.
 - **Human-editable local accounting rules.** `accounting-rules.md` lets you store company-specific booking defaults and annual-report overrides in Markdown instead of code or JSON.
 - **Session audit log.** Every mutating operation (create, update, delete, confirm, import) is logged to a human-readable Markdown file at `logs/{connection}.audit.md` in the working directory. Each entry includes timestamps, tool name, entity details, account postings, and financial amounts. Use `get_session_log` to view, `list_audit_logs` to browse all companies, and `clear_session_log` to reset. The log persists across sessions and is company-specific. Set `EARVELDAJA_AUDIT_LANG=en` for English labels (default: Estonian).
 - **Tag MCP-created invoices.** Set `EARVELDAJA_TAG_NOTES=true` to append `(e-arveldaja-mcp)` to the notes field of all invoices created by the server. Off by default.
 - **Debug log file.** Set `EARVELDAJA_LOG_FILE=/path/to/mcp.err.log` to tee everything the server writes to stderr (warnings, fatal errors, and — once the MCP transport is up — the structured logger output) into the given file in append mode. Off by default. Cross-platform (Linux, macOS, Windows). Useful when the MCP host swallows stderr; example: `EARVELDAJA_LOG_FILE=/tmp/mcp.err.log`.
+- **OCR is local and lazily loaded.** Document parsing uses `@llamaindex/liteparse`, a native module (Rust + bundled PDFium) that runs locally. It is loaded only when an OCR tool is first used, so the server boots on every platform; OCR itself needs a supported host — macOS (arm64/x64), Linux x64/arm64 with **glibc ≥ 2.38**, or Windows x64 (musl/Alpine is not supported). On an unsupported host the non-OCR tools (ledger/Merit, CRUD, reporting, reconciliation) work normally and only the OCR tools return a clear "OCR unavailable on this platform" error.
 - **OCR text is sandboxed.** Raw OCR output from PDFs and images (`raw_text`, receipt-line `description`) is wrapped in per-call nonce delimiters (`<<UNTRUSTED_OCR_START:{nonce}>>` / `<<UNTRUSTED_OCR_END:{nonce}>>`) before being returned to the LLM, so a scanned receipt cannot smuggle tool-call instructions into your agent's context.
 - **Cross-system file input.** When the MCP server runs on a different host from your client (e.g. Claude desktop, Cowork, Cursor, or a remote container), file-reading tools also accept a `file_path` of the form `base64:<b64data>` (for PDF / PNG / JPEG / CAMT XML) or `base64:<ext>:<b64data>` (e.g. `base64:csv:QSxCLEMK...`) so files on the client side no longer need to exist on the server's filesystem.
 
 ## Non-goals (handled natively by e-arveldaja)
 
-A few things are deliberately out of scope, because e-arveldaja already does them and duplicating them in the MCP layer would risk double-booking:
+These exclusions are about the **e-arveldaja backend** specifically. A few things are deliberately out of scope, because e-arveldaja already does them and duplicating them in the MCP layer would risk double-booking (other backends reached through the [ledger layer](#backends) make their own equivalent choices):
 
 - **No VAT/KMD return (käibedeklaratsioon).** e-arveldaja generates the KMD natively from the confirmed ledger and files it to EMTA. The server's tax-rules layer (`earveldaja://tax_rules`) is advisory only — it informs booking decisions, it does not produce or file returns.
 - **No EMTA prepayment-account tax entries.** A bank transfer to EMTA (Maksu- ja Tolliamet) is booked as a prepayment-account top-up (Debit *ettemaksukonto* / Credit bank); the tax-expense entries that draw it down are created by e-arveldaja from its EMTA prepayment-account statement, not by this server.

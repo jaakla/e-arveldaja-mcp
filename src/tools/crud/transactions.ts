@@ -10,7 +10,6 @@ import { HttpError } from "../../http-client.js";
 import { applyListView, viewParam } from "../../list-views.js";
 import { validateTransactionDistributionDimensions } from "../../account-validation.js";
 import type { Transaction, TransactionDistribution } from "../../types/api.js";
-import { buildLedgerRegistry } from "../../ledger/registry.js";
 import { unwrap } from "../../ledger/result.js";
 import type { Payment, PaymentAllocation } from "../../ledger/types.js";
 import type { ApiContext } from "./shared.js";
@@ -24,6 +23,7 @@ import {
   parseJsonObject,
   parseTransactionDistributions,
   validateTransactionUpdateData,
+  earveldajaConnector,
 } from "./shared.js";
 
 /**
@@ -227,7 +227,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
     // recordPayment operation; the e-arveldaja transaction id and the optional
     // explicit clients_id (with pre-set + rollback) ride in `raw`. Distribution
     // sub-account ids map to the allocation's account dimension.
-    const connector = buildLedgerRegistry(api).get("e-arveldaja")!;
+    const connector = earveldajaConnector(api);
     const payment: Payment = {
       // The transaction already knows its own bank/date/amount; these canonical
       // fields are unused on the e-arveldaja transaction-confirm path.

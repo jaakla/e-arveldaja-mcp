@@ -10,8 +10,7 @@ import { DEFAULT_LIABILITY_ACCOUNT } from "../../accounting-defaults.js";
 import { applyListView, viewParam } from "../../list-views.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "../purchase-vat-defaults.js";
 import { validateItemDimensions } from "../../account-validation.js";
-import type { CreatePurchaseInvoiceData, PurchaseInvoiceItem } from "../../types/api.js";
-import { buildLedgerRegistry } from "../../ledger/registry.js";
+import type { PurchaseInvoiceItem } from "../../types/api.js";
 import { unwrap } from "../../ledger/result.js";
 import type { InvoiceLine, PurchaseInvoice as LedgerPurchaseInvoice } from "../../ledger/types.js";
 import type { ApiContext } from "./shared.js";
@@ -28,6 +27,7 @@ import {
   parsePurchaseInvoiceItems,
   tagNotes,
   validateUpdateFields,
+  earveldajaConnector,
 } from "./shared.js";
 
 /**
@@ -123,7 +123,7 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
       // PurchaseInvoiceItem, each line's `raw` preserving exact backend fields);
       // invoice-level fields + the createAndSetTotals inputs ride in `raw` under
       // __-prefixed hint keys.
-      const connector = buildLedgerRegistry(api).get("e-arveldaja")!;
+      const connector = earveldajaConnector(api);
       const invoice: LedgerPurchaseInvoice = {
         vendor: { entity: "party", backend: "e-arveldaja", value: String(params.clients_id) },
         vendorBillNo: params.number,

@@ -2,7 +2,7 @@
 
 ## Project
 
-This repository is `e-arveldaja-mcp`, a TypeScript MCP server for the Estonian e-arveldaja / RIK e-Financials REST API.
+This repository is `e-arveldaja-mcp`, a TypeScript MCP server for Estonian cloud bookkeeping. e-arveldaja / RIK e-Financials is the native backend (full tool coverage); a backend-neutral ledger layer (`src/ledger/`) adds a `LedgerConnector` port and a Merit Aktiva adapter, with `ledger_*` tools and four migrated write tools routing through it. Do not assume e-arveldaja is the only accounting system — most tools and all workflows are e-arveldaja-specific, but the ledger layer is cross-backend and each connector declares its own `capabilities` (booking model, numbering, dimensions, VAT scope). See `ARCHITECTURE.md` → "Ledger abstraction layer".
 
 The actual git repo root is:
 
@@ -61,8 +61,9 @@ Do not claim completion, commit, tag, publish, or push until the relevant verifi
 - `src/config.ts` handles credential loading, setup mode, `.env` import, server selection, and multi-connection setup.
 - `src/http-client.ts` handles authenticated API calls, retries, timeout behavior, rate limiting, and upstream error handling.
 - `src/auth.ts` implements HMAC-SHA-384 signing.
-- `src/api/` contains API resource wrappers.
-- `src/tools/` contains most MCP tools and workflow logic.
+- `src/api/` contains e-arveldaja API resource wrappers.
+- `src/ledger/` contains the backend-neutral ledger abstraction: the `LedgerConnector` port + canonical types, a registry, the e-arveldaja adapter (wraps `src/api/`), and the Merit Aktiva adapter (own HMAC-SHA256 signer + transport).
+- `src/tools/` contains most MCP tools and workflow logic; the `ledger_*` tools and the four migrated write tools call through `src/ledger/`.
 - `src/prompts.ts` contains workflow prompt text.
 - `src/resources/` contains MCP resources.
 - `src/mcp-json.ts` and `src/tool-response.ts` shape MCP-safe output.

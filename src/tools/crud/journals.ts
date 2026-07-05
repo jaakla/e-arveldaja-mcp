@@ -10,7 +10,6 @@ import { HttpError } from "../../http-client.js";
 import { applyListView, viewParam } from "../../list-views.js";
 import { withOpeningBalanceApiLimitation } from "../../opening-balance-limitations.js";
 import { validatePostingDimensions } from "../../account-validation.js";
-import { buildLedgerRegistry } from "../../ledger/registry.js";
 import { unwrap } from "../../ledger/result.js";
 import type { JournalEntry, Posting as LedgerPosting } from "../../ledger/types.js";
 import type { Posting } from "../../types/api.js";
@@ -25,6 +24,7 @@ import {
   parseJsonObject,
   parsePostings,
   validateUpdateFields,
+  earveldajaConnector,
 } from "./shared.js";
 
 /**
@@ -171,7 +171,7 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
     // Route the create through the LedgerConnector port (e-arveldaja backend).
     // Each posting becomes a canonical Posting whose `raw` carries the exact
     // backend fields, so the adapter reconstructs the identical API payload.
-    const connector = buildLedgerRegistry(api).get("e-arveldaja")!;
+    const connector = earveldajaConnector(api);
     const entry: JournalEntry = {
       date: params.effective_date,
       memo: params.title,

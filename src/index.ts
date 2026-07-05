@@ -51,6 +51,7 @@ import { registerAccountingInboxTools } from "./tools/accounting-inbox.js";
 import { registerAnalyzeUnconfirmedTools } from "./tools/analyze-unconfirmed.js";
 import { registerWorkflowRecommendationTools } from "./tools/workflow-recommendations.js";
 import { registerLedgerTools } from "./tools/ledger-tools.js";
+import { buildLedgerRegistry } from "./ledger/registry.js";
 import { clearConnectionCaches, registerCacheControlTool } from "./cache-control.js";
 import { registerResources } from "./resources/static-resources.js";
 import { registerDynamicResources } from "./resources/dynamic-resources.js";
@@ -401,6 +402,24 @@ async function main() {
   const api = setupMode
     ? createSetupModeApiContext(setupInfo)
     : createScopedApiContext(connectionState, connectionContexts, invocationStorage);
+
+  // A "ledger session" is when e-arveldaja has no credentials but another
+  // bookkeeping backend (e.g. Merit Aktiva) is configured through the ledger
+  // layer. The server still boots in e-arveldaja setup mode for the 133
+  // e-arveldaja-specific tools, but the backend-neutral ledger_* tools work
+  // against the configured backend, which is the registry default in this case.
+  const startupLedgerBackends = buildLedgerRegistry(api, process.env, { earveldajaConfigured: !setupMode })
+    .list()
+    .filter((b) => b.configured && b.backendId !== "e-arveldaja");
+  const ledgerOnlySession = setupMode && startupLedgerBackends.length > 0;
+  const ledgerSessionNote = ledgerOnlySession
+    ? `Ledger session active. e-arveldaja has no credentials, but these ledger backends are configured: ` +
+      `${startupLedgerBackends.map((b) => b.label).join(", ")}. The backend-neutral ledger_* tools ` +
+      `(list_ledger_backends, ledger_list_*, ledger_create_sales_invoice, ledger_create_purchase_invoice, ` +
+      `ledger_record_payment, ledger_post_journal, ledger_confirm, ledger_void) work against them and default ` +
+      `to the configured backend. The e-arveldaja-specific tools below still require e-arveldaja credentials.\n\n`
+    : "";
+
   const resolvedAuditCompanyNames = new Map<number, string | null>();
   const auditLabelResolutionPromises = new Map<number, Promise<void>>();
 
@@ -473,8 +492,8 @@ async function main() {
       "PDF invoice extraction, supplier resolution with business registry lookup, " +
       "and smart booking suggestions based on past invoices.",
   }, {
-    instructions: setupMode ? `Setup mode:
-- No API credentials are configured, so e-arveldaja API-dependent tools and resources return setup guidance.
+    instructions: setupMode ? `${ledgerSessionNote}Setup mode:
+- No e-arveldaja API credentials are configured, so e-arveldaja API-dependent tools and resources return setup guidance. (Ledger backends configured through the ledger layer, e.g. Merit, are unaffected — see list_ledger_backends.)
 - Local file-analysis tools such as accounting_inbox, extract_pdf_invoice, validate_invoice_data, scan_receipt_folder, parse_lightyear_statement, and parse_lightyear_capital_gains remain available.
 - Call get_setup_instructions for the exact credential setup steps.
 - list_connections returns the currently configured connections (0 until credentials are added).
@@ -989,7 +1008,7 @@ async function main() {
   registerAccountingInboxTools(scopedServer, api);
   registerAnalyzeUnconfirmedTools(scopedServer, api);
   registerWorkflowRecommendationTools(scopedServer);
-  registerLedgerTools(scopedServer, api);
+  registerLedgerTools(scopedServer, api, { earveldajaConfigured: !setupMode });
 
   // Register resources via scopedServer so reads stay pinned to the selected connection
   registerResources(scopedServer, api);
@@ -1027,7 +1046,14 @@ async function main() {
     reportStartupCredentialImportOutcome(startupImportOutcome);
   }
 
-  if (setupMode) {
+  if (setupMode && ledgerOnlySession) {
+    process.stderr.write(
+      `e-arveldaja MCP server started as a ledger session: e-arveldaja not configured, ` +
+      `but ${startupLedgerBackends.map((b) => b.label).join(", ")} available via the ledger layer. ` +
+      `The ledger_* tools work against ${startupLedgerBackends[0]!.label} (default). ` +
+      `Add e-arveldaja credentials (get_setup_instructions) to enable the e-arveldaja-specific tools.\n`
+    );
+  } else if (setupMode) {
     process.stderr.write(
       `e-arveldaja MCP server started in setup mode (0 connections configured). ` +
       `Call get_setup_instructions for credential setup. Working directory: ${setupInfo.working_directory}. ` +

@@ -1,4 +1,10 @@
-import { LiteParse, type LiteParseConfig, type ParseResult } from "@llamaindex/liteparse";
+// Type-only import: erased at compile time so importing this module never
+// triggers loading the @llamaindex/liteparse native binary. The native module
+// (a Rust addon bundling PDFium) is loaded lazily on first OCR use — see
+// getDocumentParser — so the server boots on platforms where the binary cannot
+// load (e.g. glibc < 2.38, musl/Alpine), with OCR failing only when invoked
+// rather than crashing the whole server at startup.
+import type { LiteParse, LiteParseConfig, ParseResult } from "@llamaindex/liteparse";
 
 function isLoopbackHost(hostname: string): boolean {
   const normalized = hostname.trim().toLowerCase().replace(/^\[(.*)\]$/, "$1");
@@ -71,15 +77,38 @@ export function buildDocumentParserConfig(): Partial<LiteParseConfig> {
   return config;
 }
 
-let parser: LiteParse | undefined;
+/**
+ * Dynamically load the liteparse native module, turning its cryptic native
+ * loader failure into an actionable error. Only called when OCR is actually
+ * used, so an unsupported platform does not prevent the server from booting.
+ */
+async function loadLiteParse(): Promise<typeof import("@llamaindex/liteparse")> {
+  try {
+    return await import("@llamaindex/liteparse");
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      "Document OCR is unavailable on this platform: the @llamaindex/liteparse native module " +
+      "could not be loaded. It requires a supported platform — macOS (arm64/x64), Linux x64/arm64 " +
+      "with glibc ≥ 2.38, or Windows x64; musl/Alpine is unsupported. The rest of the server " +
+      `(including non-OCR and ledger tools) is unaffected. Underlying error: ${detail}`,
+    );
+  }
+}
 
-export function getDocumentParser(): LiteParse {
-  parser ??= new LiteParse(buildDocumentParserConfig());
-  return parser;
+// Cache the parser promise so the native module is imported and the parser
+// constructed at most once. A cached rejection is fine: a platform that cannot
+// load the binary will not start being able to mid-process.
+let parserPromise: Promise<LiteParse> | undefined;
+
+export async function getDocumentParser(): Promise<LiteParse> {
+  parserPromise ??= loadLiteParse().then(({ LiteParse }) => new LiteParse(buildDocumentParserConfig()));
+  return parserPromise;
 }
 
 export async function parseDocument(filePath: string): Promise<ParsedDocument> {
-  const result = await getDocumentParser().parse(filePath);
+  const parser = await getDocumentParser();
+  const result = await parser.parse(filePath);
   return {
     text: result.text,
     pageCount: result.pages.length,

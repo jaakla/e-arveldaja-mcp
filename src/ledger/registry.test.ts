@@ -31,4 +31,29 @@ describe("buildLedgerRegistry", () => {
     const reg = buildLedgerRegistry(api, { EARVELDAJA_LEDGER_DEFAULT_BACKEND: "merit" });
     expect(reg.defaultBackend).toBe("e-arveldaja");
   });
+
+  it("reports e-arveldaja as unconfigured when earveldajaConfigured is false", () => {
+    const reg = buildLedgerRegistry(api, {}, { earveldajaConfigured: false });
+    const ea = reg.list().find((b) => b.backendId === "e-arveldaja")!;
+    expect(ea.configured).toBe(false);
+    expect(ea.note).toContain("setup mode");
+  });
+
+  it("Merit-only: defaults to merit when e-arveldaja has no credentials", () => {
+    const reg = buildLedgerRegistry(
+      api,
+      { MERIT_API_ID: "id", MERIT_API_KEY: "key" },
+      { earveldajaConfigured: false },
+    );
+    expect(reg.defaultBackend).toBe("merit");
+    expect(reg.get()!.capabilities.backendId).toBe("merit"); // unqualified resolves to merit
+    const ea = reg.list().find((b) => b.backendId === "e-arveldaja")!;
+    expect(ea.configured).toBe(false);
+    expect(reg.list().find((b) => b.backendId === "merit")!.isDefault).toBe(true);
+  });
+
+  it("falls back to e-arveldaja as default only when nothing else is configured", () => {
+    const reg = buildLedgerRegistry(api, {}, { earveldajaConfigured: false });
+    expect(reg.defaultBackend).toBe("e-arveldaja"); // last resort, even though unconfigured
+  });
 });

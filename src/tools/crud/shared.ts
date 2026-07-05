@@ -8,6 +8,8 @@ import type { SaleInvoicesApi } from "../../api/sale-invoices.api.js";
 import type { PurchaseInvoicesApi } from "../../api/purchase-invoices.api.js";
 import type { ReferenceDataApi } from "../../api/readonly.api.js";
 import type { Posting, TransactionDistribution, SaleInvoiceItem, PurchaseInvoiceItem } from "../../types/api.js";
+import { buildLedgerRegistry } from "../../ledger/registry.js";
+import type { LedgerConnector } from "../../ledger/port.js";
 
 export interface ApiContext {
   clients: ClientsApi;
@@ -17,6 +19,16 @@ export interface ApiContext {
   saleInvoices: SaleInvoicesApi;
   purchaseInvoices: PurchaseInvoicesApi;
   readonly: ReferenceDataApi;
+}
+
+/**
+ * The e-arveldaja LedgerConnector for the active connection. The host backend
+ * is always registered, so the lookup never misses. Used by the write tools
+ * that have been migrated onto the ledger port (create_sale_invoice,
+ * create_purchase_invoice, create_journal, confirm_transaction).
+ */
+export function earveldajaConnector(api: ApiContext): LedgerConnector {
+  return buildLedgerRegistry(api).get("e-arveldaja")!;
 }
 
 /** Check if company is VAT-registered via /vat_info */

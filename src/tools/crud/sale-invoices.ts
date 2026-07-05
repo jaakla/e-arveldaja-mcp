@@ -21,8 +21,8 @@ import {
   parseSaleInvoiceItems,
   tagNotes,
   validateUpdateFields,
+  earveldajaConnector,
 } from "./shared.js";
-import { buildLedgerRegistry } from "../../ledger/registry.js";
 import { unwrap } from "../../ledger/result.js";
 import type { InvoiceLine, SalesInvoice } from "../../ledger/types.js";
 import type { SaleInvoiceItem } from "../../types/api.js";
@@ -102,7 +102,7 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
     // Invoice-level e-arveldaja fields ride in `raw`; items become canonical
     // lines that the adapter maps back to SaleInvoiceItem, so this is a worked
     // example of an existing tool migrated onto the abstraction.
-    const connector = buildLedgerRegistry(api).get("e-arveldaja")!;
+    const connector = earveldajaConnector(api);
     const invoice: SalesInvoice = {
       customer: { entity: "party", backend: "e-arveldaja", value: String(params.clients_id) },
       docDate: params.create_date,
