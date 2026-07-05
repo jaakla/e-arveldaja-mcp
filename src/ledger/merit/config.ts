@@ -17,7 +17,9 @@ export interface MeritConfig {
 
 const HOSTS: Record<"EE" | "PL", string> = {
   EE: "https://aktiva.merit.ee",
-  PL: "https://program.merit.pl",
+  // Merit's Polish product is 360 Księgowość (host verified against the
+  // jaakla/merit_api reference client).
+  PL: "https://program.360ksiegowosc.pl",
 };
 
 export function getMeritConfig(env: NodeJS.ProcessEnv = process.env): MeritConfig | null {

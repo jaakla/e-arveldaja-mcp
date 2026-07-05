@@ -65,6 +65,44 @@ describe("MeritHttpClient retry behaviour", () => {
   });
 });
 
+describe("MeritHttpClient business errors (HTTP 200 + Success:false)", () => {
+  it("throws when Merit rejects a write with Success:false on a 200 response", async () => {
+    const fetchImpl = vi.fn().mockImplementation(async () =>
+      new Response(JSON.stringify({ Success: false, ErrorCode: "dup", Error: "Invoice already exists" }), { status: 200 }));
+    const client = makeClient(fetchImpl as unknown as typeof fetch);
+
+    await expect(client.post("sendinvoice", { a: 1 })).rejects.toMatchObject({
+      status: 200,
+      message: expect.stringContaining("Invoice already exists"),
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1); // deterministic rejection — never retried
+  });
+
+  it("passes through array payloads and Success:true objects untouched", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockImplementationOnce(async () => new Response(JSON.stringify([{ Id: "1" }]), { status: 200 }))
+      .mockImplementationOnce(async () => new Response(JSON.stringify({ Success: true, Message: "OK" }), { status: 200 }));
+    const client = makeClient(fetchImpl as unknown as typeof fetch);
+
+    await expect(client.post("getcustomers")).resolves.toEqual([{ Id: "1" }]);
+    await expect(client.post("sendinvoicebyemail", { Id: "x" })).resolves.toEqual({ Success: true, Message: "OK" });
+  });
+
+  it("retries a 500 on a get* endpoint but not on a send* endpoint", async () => {
+    const flaky = vi
+      .fn()
+      .mockImplementationOnce(async () => new Response("boom", { status: 500 }))
+      .mockImplementationOnce(async () => new Response("[]", { status: 200 }));
+    await expect(makeClient(flaky as unknown as typeof fetch).post("getcustomers")).resolves.toEqual([]);
+    expect(flaky).toHaveBeenCalledTimes(2);
+
+    const failing = vi.fn().mockImplementation(async () => new Response("boom", { status: 500 }));
+    await expect(makeClient(failing as unknown as typeof fetch).post("sendinvoice", {})).rejects.toMatchObject({ status: 500 });
+    expect(failing).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("MeritHttpClient rate limiting", () => {
   it("spaces sequential requests by at least minIntervalMs", async () => {
     const fetchImpl = vi.fn().mockImplementation(async () => new Response("[]", { status: 200 }));

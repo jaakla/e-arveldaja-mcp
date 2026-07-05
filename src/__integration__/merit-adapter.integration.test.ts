@@ -38,4 +38,22 @@ run("Merit adapter (live, read-only)", () => {
     if (!res.ok) return;
     expect(res.data.every((t) => typeof t.ratePct === "number")).toBe(true);
   }, 30000);
+
+  it("reads parties from BOTH registries with non-empty refs", async () => {
+    const res = await adapter.listParties();
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.data.length).toBeGreaterThan(0);
+    // Live rows carry CustomerId / VendorId — a field rename must fail loudly.
+    expect(res.data.every((p) => p.id!.value.length > 0)).toBe(true);
+    const kinds = new Set(res.data.map((p) => p.kind));
+    expect(kinds.has("customer") || kinds.has("vendor")).toBe(true);
+  }, 30000);
+
+  it("reads items with non-empty refs and names", async () => {
+    const res = await adapter.listItems();
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.data.every((i) => i.id!.value.length > 0 && i.name.length > 0)).toBe(true);
+  }, 30000);
 });

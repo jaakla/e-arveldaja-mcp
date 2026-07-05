@@ -5,7 +5,15 @@
  * document (or a balanced JournalEntry) and Merit posts the double entry
  * itself, so `confirm()` is a no-op. The adapter hides Merit's quirks:
  * caller-assigned invoice numbers, singular `InvoiceRow`, row-level TaxId GUID,
- * required TaxAmount/TotalAmount, YYYYMMDD dates, and the 3-month query cap.
+ * required TaxAmount/TotalAmount (real VAT amounts, gross total), YYYYMMDD
+ * dates, split customer/vendor endpoints, and the 3-month query cap.
+ *
+ * Payload shapes, endpoint versions, and response field names are validated
+ * against the live-tested jaakla/merit_api reference client. Notable traps it
+ * documents: purchase invoices use `InvoiceRow` + `GLAccountCode` (not
+ * `Account`), Vendor must carry both Id AND Name, create responses use
+ * `BillId` / `InvoiceId`, and every canonical `raw` object is spread into the
+ * outgoing payload last so backend-specific fields can be added or overridden.
  */
 import type {
   Account, AccountCode, Item, JournalEntry, Money, Party, Payment, Posting,
@@ -53,7 +61,7 @@ export class MeritAdapter implements LedgerConnector, EInvoiceCapable {
     },
   };
 
-  private taxIdByCode = new Map<string, string>();
+  private taxByCode = new Map<string, { id: string; pct: number }>();
 
   constructor(private http: MeritHttp) {}
 
@@ -67,42 +75,62 @@ export class MeritAdapter implements LedgerConnector, EInvoiceCapable {
   async listTaxRates(): Promise<Result<TaxRate[]>> {
     try {
       const rows = await this.http.post<MeritTax[]>("gettaxes", undefined, { version: "v1" });
-      this.taxIdByCode.clear();
-      for (const t of rows) this.taxIdByCode.set(t.Code ?? t.Name, t.Id);
+      this.taxByCode.clear();
+      for (const t of rows) this.taxByCode.set(t.Code ?? t.Name, { id: t.Id, pct: t.TaxPct });
       return ok(rows.map((t) => ({ code: t.Code ?? t.Name, ratePct: t.TaxPct })));
     } catch (e) { return fail(fromThrown(e)); }
   }
 
+  /** Merit keeps customers and vendors in separate registries — return both. */
   async listParties(): Promise<Result<Party[]>> {
     try {
-      const rows = await this.http.post<MeritCustomer[]>("getcustomers", {}, { version: "v2" });
-      return ok(rows.map(toCanonicalParty));
+      const customers = await this.http.post<MeritCustomer[]>("getcustomers", {});
+      const vendors = await this.http.post<MeritVendor[]>("getvendors", {});
+      return ok([
+        ...customers.map(toCanonicalCustomer),
+        ...vendors.map(toCanonicalVendor),
+      ]);
     } catch (e) { return fail(fromThrown(e)); }
   }
 
+  /** Kind-aware: vendors go to sendvendor (v1), customers to sendcustomer (v2). */
   async upsertParty(p: Party): Promise<Result<Party>> {
     try {
-      const res = await this.http.post<{ CustomerId: string }>(
-        "sendcustomer",
-        { Name: p.name, RegNo: p.regCode, VatRegNo: p.vatNumber, Email: p.email },
-        { version: "v2" },
-      );
-      return ok({ ...p, id: guidRef("party", res.CustomerId) });
+      const body = {
+        ...(p.id ? { Id: p.id.value } : {}),
+        Name: p.name,
+        RegNo: p.regCode,
+        VatRegNo: p.vatNumber,
+        Email: p.email,
+        ...(p.iban ? { BankAccount: p.iban } : {}),
+        ...(p.raw ?? {}),
+      };
+      const res = p.kind === "vendor"
+        ? await this.http.post<MeritPartyCreated>("sendvendor", body, { version: "v1" })
+        : await this.http.post<MeritPartyCreated>("sendcustomer", body, { version: "v2" });
+      const id = res.CustomerId ?? res.VendorId ?? res.Id ?? p.id?.value;
+      return ok({ ...p, id: guidRef("party", id) });
     } catch (e) { return fail(fromThrown(e)); }
   }
 
   async listItems(): Promise<Result<Item[]>> {
     try {
-      const rows = await this.http.post<MeritItem[]>("getitems", undefined, { version: "v2" });
-      return ok(rows.map((i) => ({ id: guidRef("item", i.Id), code: i.Code, name: i.Description })));
+      const rows = await this.http.post<MeritItem[]>("getitems", {});
+      return ok(rows.map((i) => ({
+        // Live v1 rows carry ItemId (not Id).
+        id: guidRef("item", i.ItemId ?? i.Id),
+        code: i.Code,
+        name: i.Name ?? i.Description ?? "",
+        ...(i.UnitofMeasureName ? { unit: i.UnitofMeasureName } : {}),
+      })));
     } catch (e) { return fail(fromThrown(e)); }
   }
 
   async createSalesInvoice(inv: SalesInvoice): Promise<Result<SalesInvoice>> {
     try {
       const number = inv.number ?? (await this.nextSalesNumber(inv.docDate));
-      const taxIds = await this.resolveTaxIds(inv.lines.map((l) => l.taxCode));
-      const body = toMeritSalesInvoice(inv, number, taxIds);
+      const taxes = await this.resolveTaxes(inv.lines.map((l) => l.taxCode));
+      const body = toMeritSalesInvoice(inv, number, taxes);
       const res = await this.http.post<MeritInvoiceCreated>("sendinvoice", body, { version: "v1" });
       // Merit posted AR / revenue / VAT itself — nothing to confirm.
       return ok({
@@ -117,40 +145,87 @@ export class MeritAdapter implements LedgerConnector, EInvoiceCapable {
 
   async listSalesInvoices(q: ListQuery): Promise<Result<SalesInvoice[]>> {
     try {
-      const rows = await this.http.post<MeritInvoiceFull[]>("getinvoices", clampPeriod(q), { version: "v2" });
+      const rows = await this.http.post<MeritInvoiceFull[]>("getinvoices", defaultPeriod(q), { version: "v2" });
       return ok(rows.map(toCanonicalSaleInvoice));
     } catch (e) { return fail(fromThrown(e)); }
   }
 
   async createPurchaseInvoice(inv: PurchaseInvoice): Promise<Result<PurchaseInvoice>> {
     try {
-      const taxIds = await this.resolveTaxIds(inv.lines.map((l) => l.taxCode));
-      const body = toMeritPurchaseInvoice(inv, taxIds);
-      const res = await this.http.post<{ PurchInvoiceId: string }>("sendpurchinvoice", body, { version: "v1" });
-      return ok({ ...inv, id: guidRef("purchaseInvoice", res.PurchInvoiceId), status: "confirmed", settle: "unpaid" });
+      // Merit requires Vendor to carry BOTH Id and Name, even for an existing
+      // vendor — resolve the name when the caller passed only a Ref.
+      const vendor = await this.vendorPayload(inv.vendor);
+      if (!vendor) {
+        return fail({ code: "not_found", message: `Vendor ${(inv.vendor as Ref).value} not found in Merit's vendor registry.` });
+      }
+      const taxes = await this.resolveTaxes(inv.lines.map((l) => l.taxCode));
+      const body = toMeritPurchaseInvoice(inv, taxes, vendor);
+      const res = await this.http.post<MeritPurchaseCreated>("sendpurchinvoice", body, { version: "v1" });
+      return ok({ ...inv, id: guidRef("purchaseInvoice", res.BillId ?? res.PurchInvoiceId), status: "confirmed", settle: "unpaid" });
     } catch (e) { return fail(fromThrown(e)); }
   }
 
   async listPurchaseInvoices(q: ListQuery): Promise<Result<PurchaseInvoice[]>> {
     try {
-      const rows = await this.http.post<MeritPurchaseFull[]>("getpurchorders", clampPeriod(q));
+      const rows = await this.http.post<MeritPurchaseFull[]>("getpurchorders", defaultPeriod(q));
       return ok(rows.map(toCanonicalPurchaseInvoice));
     } catch (e) { return fail(fromThrown(e)); }
   }
 
+  /**
+   * Merit's sendPaymentV is a flat vendor-payment document: one bill per call,
+   * identified by BillNo + VendorName (not by GUID), paid to the vendor's
+   * IBAN. The adapter resolves BillNo/VendorName from a purchaseInvoice ref
+   * via getpurchorder and the IBAN from the vendor registry; `raw` fields
+   * (BillNo, VendorName, IBAN, CustName, …) take precedence and are spread
+   * into the payload last.
+   */
   async recordPayment(p: Payment): Promise<Result<Payment>> {
     try {
-      const body = {
-        PaymentDate: ymd(p.date),
-        BankId: p.bank.value,
+      const raw = (p.raw ?? {}) as Record<string, unknown>;
+      if (p.allocations.length !== 1) {
+        return fail({ code: "validation", message: "Merit sendPaymentV settles exactly one bill per call — pass a single allocation." });
+      }
+      const target = p.allocations[0]!.target;
+
+      let billNo = typeof raw.BillNo === "string" ? raw.BillNo : undefined;
+      let vendorName = typeof raw.VendorName === "string" ? raw.VendorName : undefined;
+      if (!billNo || !vendorName) {
+        if ("account" in target || target.entity !== "purchaseInvoice") {
+          return fail({
+            code: "unsupported",
+            message: "Merit payments are wired for purchase-invoice settlement: allocate to a purchaseInvoice ref, or pass raw.BillNo / raw.VendorName explicitly.",
+          });
+        }
+        const detail = await this.http.post<MeritPurchaseFull>("getpurchorder", { Id: target.value, SkipAttachment: true });
+        billNo ??= detail.BillNo;
+        vendorName ??= detail.VendorName;
+      }
+
+      let iban = typeof raw.IBAN === "string" ? raw.IBAN : undefined;
+      if (!iban && vendorName) {
+        const vendors = await this.http.post<MeritVendor[]>("getvendors", { Name: vendorName });
+        iban = vendors.find((v) => v.Name === vendorName)?.BankAccount;
+      }
+      if (!iban) {
+        return fail({ code: "validation", message: `IBAN missing for vendor "${vendorName ?? "?"}" — pass raw.IBAN or set the vendor's bank account in Merit.` });
+      }
+
+      const foreignCurrency = p.amount.currency && p.amount.currency !== "EUR";
+      const body: Record<string, unknown> = {
+        ...(p.bank.value ? { BankId: p.bank.value } : {}),
+        VendorName: vendorName,
+        BillNo: billNo,
         Amount: Number(p.amount.amount),
-        PaymentRow: p.allocations.map((a) => ({
-          InvoiceId: "account" in a.target ? undefined : a.target.value,
-          Amount: Number(a.amount.amount),
-        })),
+        IBAN: iban,
+        PaymentDate: ymd(p.date),
+        ...(foreignCurrency ? { CurrencyCode: p.amount.currency } : {}),
+        ...raw,
       };
-      const res = await this.http.post<{ PaymentId: string }>("sendPaymentV", body, { version: "v1" });
-      return ok({ ...p, id: guidRef("payment", res.PaymentId), status: "confirmed" });
+      // Merit routes multi-currency payments through v2 (reference-client behaviour).
+      const version = body.CurrencyCode ? "v2" : "v1";
+      const res = await this.http.post<MeritPaymentCreated>("sendPaymentV", body, { version });
+      return ok({ ...p, id: guidRef("payment", res.InvoiceId ?? res.PaymentId), status: "confirmed" });
     } catch (e) { return fail(fromThrown(e)); }
   }
 
@@ -210,29 +285,77 @@ export class MeritAdapter implements LedgerConnector, EInvoiceCapable {
 
   // --- internals ---
   private async nextSalesNumber(docDate: IsoDate): Promise<string> {
-    const rows = await this.http.post<MeritInvoiceFull[]>("getinvoices", { PeriodEnd: ymd(docDate) }, { version: "v2" });
+    // Merit caps invoice-list queries at ~3 months, so bound the window.
+    const rows = await this.http.post<MeritInvoiceFull[]>(
+      "getinvoices",
+      { PeriodStart: ymd(shiftDays(docDate, -90)), PeriodEnd: ymd(docDate) },
+      { version: "v2" },
+    );
     const max = rows.reduce((m, r) => Math.max(m, Number(r.InvoiceNo) || 0), 0);
     return String(max + 1);
   }
 
-  private async resolveTaxIds(codes: string[]): Promise<Map<string, string>> {
-    if (this.taxIdByCode.size === 0) await this.listTaxRates();
-    const m = new Map<string, string>();
+  private async resolveTaxes(codes: string[]): Promise<Map<string, { id: string; pct: number }>> {
+    if (this.taxByCode.size === 0) await this.listTaxRates();
+    const m = new Map<string, { id: string; pct: number }>();
     for (const c of codes) {
-      const id = this.taxIdByCode.get(c);
-      if (id) m.set(c, id);
+      const tax = this.taxByCode.get(c);
+      if (tax) m.set(c, tax);
     }
     return m;
+  }
+
+  /** Resolve a canonical vendor into Merit's required {Id, Name} (or {Name, RegNo} for a new vendor). */
+  private async vendorPayload(v: PurchaseInvoice["vendor"]): Promise<Record<string, unknown> | undefined> {
+    if ("name" in v) return { Name: v.name, ...(v.regCode ? { RegNo: v.regCode } : {}) };
+    const vendors = await this.http.post<MeritVendor[]>("getvendors", {});
+    const match = vendors.find((x) => (x.VendorId ?? x.Id) === v.value);
+    return match ? { Id: v.value, Name: match.Name } : undefined;
   }
 }
 
 /* --- pure mappers (canonical <-> Merit JSON) --- */
 
-function clampPeriod(q: ListQuery): { PeriodStart?: string; PeriodEnd?: string } {
-  return {
-    ...(q.periodStart ? { PeriodStart: ymd(q.periodStart) } : {}),
-    ...(q.periodEnd ? { PeriodEnd: ymd(q.periodEnd) } : {}),
-  };
+function shiftDays(date: IsoDate, days: number): IsoDate {
+  const d = new Date(`${date}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Merit's list endpoints require a period and cap it at ~3 months; default to
+ * the last 90 days when the caller gave none (reference-client behaviour).
+ */
+function defaultPeriod(q: ListQuery): { PeriodStart: string; PeriodEnd: string } {
+  const today = new Date().toISOString().slice(0, 10);
+  const end = q.periodEnd ?? today;
+  const start = q.periodStart ?? shiftDays(end, -90);
+  return { PeriodStart: ymd(start), PeriodEnd: ymd(end) };
+}
+
+const round2 = (n: number): number => Math.round(n * 100) / 100;
+
+/**
+ * Merit requires a TaxAmount array with the REAL per-rate VAT amounts (an
+ * entry per distinct TaxId, zero included) and a gross TotalAmount. Returns
+ * both computed from the lines' net amounts (PriceInclVat is false).
+ */
+function computeTaxTotals(
+  lines: Array<{ quantity: string; unitPrice: Money; taxCode: string }>,
+  taxes: Map<string, { id: string; pct: number }>,
+): { TaxAmount: Array<{ TaxId: string; Amount: number }>; net: number; tax: number } {
+  const byTaxId = new Map<string, number>();
+  let net = 0;
+  for (const l of lines) {
+    const lineNet = Number(l.quantity) * Number(l.unitPrice.amount);
+    net += lineNet;
+    const tax = taxes.get(l.taxCode);
+    if (!tax) continue;
+    byTaxId.set(tax.id, (byTaxId.get(tax.id) ?? 0) + lineNet * (tax.pct / 100));
+  }
+  const TaxAmount = [...byTaxId.entries()].map(([TaxId, amount]) => ({ TaxId, Amount: round2(amount) }));
+  const tax = round2(TaxAmount.reduce((s, t) => s + t.Amount, 0));
+  return { TaxAmount, net: round2(net), tax };
 }
 
 export function isBalanced(postings: Posting[]): boolean {
@@ -267,18 +390,21 @@ function itemPayload(item: SalesInvoice["lines"][number]["item"], description?: 
   return { Code: item?.code, Description: item?.name ?? description, UOMName: item?.unit ?? "tk" };
 }
 
-export function toMeritSalesInvoice(inv: SalesInvoice, number: string, taxIds: Map<string, string>): Record<string, unknown> {
-  let grand = 0;
-  const InvoiceRow = inv.lines.map((l) => {
-    grand += Number(l.quantity) * Number(l.unitPrice.amount);
-    return {
-      Item: itemPayload(l.item, l.description),
-      Quantity: Number(l.quantity),
-      Price: Number(l.unitPrice.amount),
-      TaxId: taxIds.get(l.taxCode),
-      Account: l.account,
-    };
-  });
+export function toMeritSalesInvoice(
+  inv: SalesInvoice,
+  number: string,
+  taxes: Map<string, { id: string; pct: number }>,
+): Record<string, unknown> {
+  const { TaxAmount, net, tax } = computeTaxTotals(inv.lines, taxes);
+  const InvoiceRow = inv.lines.map((l) => ({
+    Item: itemPayload(l.item, l.description),
+    Quantity: Number(l.quantity),
+    Price: Number(l.unitPrice.amount),
+    TaxId: taxes.get(l.taxCode)?.id,
+    // Sales invoice rows use `Account` (purchase rows use GLAccountCode).
+    Account: l.account,
+    ...(l.raw ?? {}),
+  }));
   const customer = "name" in inv.customer
     ? { Name: inv.customer.name, RegNo: inv.customer.regCode }
     : { Id: inv.customer.value };
@@ -291,29 +417,45 @@ export function toMeritSalesInvoice(inv: SalesInvoice, number: string, taxIds: M
     CurrencyCode: inv.currency,
     PriceInclVat: false,
     InvoiceRow,
-    TaxAmount: [...taxIds.values()].map((Id) => ({ TaxId: Id, Amount: 0 })),
-    TotalAmount: inv.total ? Number(inv.total.amount) : grand,
-    FComment: inv.footerNote,
+    TaxAmount,
+    // TotalAmount is the GROSS sum (net + VAT) — reference-client verified.
+    TotalAmount: inv.total ? Number(inv.total.amount) : round2(net + tax),
+    ...(inv.footerNote ? { FComment: inv.footerNote } : {}),
+    ...(inv.raw ?? {}),
   };
 }
 
-export function toMeritPurchaseInvoice(inv: PurchaseInvoice, taxIds: Map<string, string>): Record<string, unknown> {
-  const vendor = "name" in inv.vendor
-    ? { Name: inv.vendor.name, RegNo: inv.vendor.regCode }
-    : { Id: inv.vendor.value };
+export function toMeritPurchaseInvoice(
+  inv: PurchaseInvoice,
+  taxes: Map<string, { id: string; pct: number }>,
+  vendor: Record<string, unknown>,
+): Record<string, unknown> {
+  const { TaxAmount, net, tax } = computeTaxTotals(inv.lines, taxes);
   return {
     Vendor: vendor,
     BillNo: inv.vendorBillNo,
     DocDate: ymd(inv.docDate),
+    TransactionDate: ymd(inv.docDate),
     DueDate: ymd(inv.dueDate),
     CurrencyCode: inv.currency,
-    PurchaseInvoiceRow: inv.lines.map((l) => ({
-      Item: itemPayload(l.item, l.description),
+    CurrencyRate: 1.0,
+    // Purchase invoices use `InvoiceRow` too (NOT PurchaseInvoiceRow) and the
+    // row account field is `GLAccountCode` (sales rows use `Account`).
+    InvoiceRow: inv.lines.map((l) => ({
+      Item: { ...itemPayload(l.item, l.description), TaxId: taxes.get(l.taxCode)?.id },
       Quantity: Number(l.quantity),
       Price: Number(l.unitPrice.amount),
-      TaxId: taxIds.get(l.taxCode),
-      Account: l.account,
+      TaxId: taxes.get(l.taxCode)?.id,
+      GLAccountCode: l.account,
+      ...(l.raw ?? {}),
     })),
+    TaxAmount,
+    TotalAmount: inv.total ? Number(inv.total.amount) : round2(net + tax),
+    RoundingAmount: 0,
+    ...(inv.sourceDocument
+      ? { Attachment: { FileName: inv.sourceDocument.filename, FileContent: inv.sourceDocument.contentBase64 } }
+      : {}),
+    ...(inv.raw ?? {}),
   };
 }
 
@@ -330,8 +472,29 @@ function toCanonicalAccount(a: MeritAccount): Account {
 function meritAccountActive(a: MeritAccount): boolean {
   return !(a.NonActive === true || a.NonActive === "True");
 }
-function toCanonicalParty(c: MeritCustomer): Party {
-  return { id: guidRef("party", c.Id), kind: "customer", name: c.Name, regCode: c.RegNo, vatNumber: c.VatRegNo };
+function toCanonicalCustomer(c: MeritCustomer): Party {
+  // Live v1 rows carry CustomerId (not Id).
+  return {
+    id: guidRef("party", c.CustomerId ?? c.Id),
+    kind: "customer",
+    name: c.Name,
+    regCode: c.RegNo,
+    vatNumber: c.VatRegNo,
+    ...(c.Email ? { email: c.Email } : {}),
+    ...(c.BankAccount ? { iban: c.BankAccount } : {}),
+  };
+}
+function toCanonicalVendor(v: MeritVendor): Party {
+  // Live v1 rows carry VendorId (not Id).
+  return {
+    id: guidRef("party", v.VendorId ?? v.Id),
+    kind: "vendor",
+    name: v.Name,
+    regCode: v.RegNo,
+    vatNumber: v.VatRegNo,
+    ...(v.Email ? { email: v.Email } : {}),
+    ...(v.BankAccount ? { iban: v.BankAccount } : {}),
+  };
 }
 function meritSettle(r: MeritInvoiceFull): SalesInvoice["settle"] {
   if (r.PaidAmount != null && r.TotalAmount != null && r.PaidAmount >= r.TotalAmount) return "paid";
@@ -354,7 +517,8 @@ function toCanonicalSaleInvoice(r: MeritInvoiceFull): SalesInvoice {
 }
 function toCanonicalPurchaseInvoice(r: MeritPurchaseFull): PurchaseInvoice {
   return {
-    id: guidRef("purchaseInvoice", r.Id),
+    // Purchase rows identify the invoice as BillId (reference-client verified).
+    id: guidRef("purchaseInvoice", r.BillId ?? r.Id),
     status: "confirmed",
     vendor: guidRef("party", r.VendorId),
     vendorBillNo: r.BillNo,
@@ -365,11 +529,16 @@ function toCanonicalPurchaseInvoice(r: MeritPurchaseFull): PurchaseInvoice {
   };
 }
 
-/* --- trimmed Merit response shapes --- */
+/* --- trimmed Merit response shapes (field names validated against the
+       jaakla/merit_api reference client and its live tests) --- */
 interface MeritAccount { AccountID: string; Code: AccountCode; Name: string; NonActive?: boolean | string; IsParent?: string; }
 interface MeritTax { Id: string; Code?: string; Name: string; TaxPct: number; }
-interface MeritCustomer { Id: string; Name: string; RegNo?: string; VatRegNo?: string; }
-interface MeritItem { Id: string; Code?: string; Description: string; }
-interface MeritInvoiceCreated { InvoiceId: string; InvoiceNo?: string; CustomerId?: string; }
+interface MeritCustomer { CustomerId?: string; Id?: string; Name: string; RegNo?: string; VatRegNo?: string; Email?: string; BankAccount?: string; }
+interface MeritVendor { VendorId?: string; Id?: string; Name: string; RegNo?: string; VatRegNo?: string; Email?: string; BankAccount?: string; }
+interface MeritItem { ItemId?: string; Id?: string; Code?: string; Name?: string; Description?: string; UnitofMeasureName?: string; }
+interface MeritPartyCreated { CustomerId?: string; VendorId?: string; Id?: string; }
+interface MeritInvoiceCreated { InvoiceId: string; InvoiceNo?: string; CustomerId?: string; RefNo?: string; }
 interface MeritInvoiceFull { InvoiceId: string; InvoiceNo?: string; CustomerId?: string; DocDate: string; DueDate?: string; CurrencyCode?: string; TotalAmount?: number; PaidAmount?: number; }
-interface MeritPurchaseFull { Id: string; VendorId?: string; BillNo: string; DocDate: string; DueDate?: string; CurrencyCode?: string; }
+interface MeritPurchaseCreated { BillId?: string; PurchInvoiceId?: string; BillNo?: string; VendorId?: string; }
+interface MeritPurchaseFull { BillId?: string; Id?: string; VendorId?: string; VendorName?: string; BillNo: string; DocDate: string; DueDate?: string; CurrencyCode?: string; }
+interface MeritPaymentCreated { InvoiceId?: string; PaymentId?: string; }
