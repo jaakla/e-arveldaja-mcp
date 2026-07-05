@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/e-arveldaja-mcp)](https://www.npmjs.com/package/e-arveldaja-mcp)
 
-MCP server for Estonian cloud bookkeeping. e-arveldaja (RIK e-Financials) is the native backend with full coverage — 133 e-arveldaja tools, 15 workflow prompts, 13 resources — and a pluggable **ledger layer** lets the same canonical accounting operations target other Estonian systems too, **Merit Aktiva** today, through thirteen backend-neutral `ledger_*` tools (discovery + reads + writes + lifecycle). Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others. See [Backends](#backends).
+MCP server for Estonian cloud bookkeeping. e-arveldaja (RIK e-Financials) is the native backend with full coverage — 133 e-arveldaja tools, 15 workflow prompts, 13 resources — and a pluggable **ledger layer** lets the same canonical accounting operations target other Estonian systems too, **Merit Aktiva** today, through fourteen backend-neutral `ledger_*` tools (discovery + reads + writes + lifecycle). Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others. See [Backends](#backends).
 
 > **Safer CAMT re-imports.** `import_camt053` preserves CAMT bank-reference and counterparty-account metadata in the writable transaction description when the e-arveldaja API drops the dedicated fields. Long bank references are stored as stable hashes, marker-only prior imports still surface in duplicate review when the exact key does not match, and repeated CAMT imports are less likely to create duplicate PROJECT rows. See the [changelog](CHANGELOG.md) for full details.
 >
@@ -173,18 +173,18 @@ The server has a backend-neutral **ledger layer** (`src/ledger/`) so accounting 
 | **e-arveldaja** (RIK) | native, full tool coverage | explicit (PROJECT → CONFIRMED → VOID) | series-managed | `apikey*.txt` / `.env` (see above) |
 | **Merit Aktiva** | via the ledger layer | auto-post (documents post on create) | caller-assigned | `MERIT_API_ID`, `MERIT_API_KEY`, optional `MERIT_API_COUNTRY=EE\|PL` |
 
-Thirteen MCP tools speak this common layer and accept a `backend` argument so an agent can target either system with one vocabulary:
+Fourteen MCP tools speak this common layer and accept a `backend` argument so an agent can target either system with one vocabulary:
 
 - **Discovery:** `list_ledger_backends` — which backends are configured, which is the default, and each one's capabilities (booking model, numbering, dimensions, VAT scope, features). **Call this first.**
 - **Reads:** `ledger_list_accounts`, `ledger_list_tax_rates`, `ledger_list_parties`, `ledger_list_items`, `ledger_list_sales_invoices`, `ledger_list_purchase_invoices`.
-- **Writes:** `ledger_create_sales_invoice`, `ledger_create_purchase_invoice`, `ledger_record_payment`, `ledger_post_journal`.
+- **Writes:** `ledger_upsert_party`, `ledger_create_sales_invoice`, `ledger_create_purchase_invoice`, `ledger_record_payment`, `ledger_post_journal`.
 - **Lifecycle:** `ledger_confirm`, `ledger_void` (on an auto-post backend like Merit, `ledger_confirm` is a no-op and `ledger_void` deletes; on e-arveldaja they register / invalidate).
 
-Merit is registered only when `MERIT_API_ID` / `MERIT_API_KEY` are set; otherwise only e-arveldaja is available. The default target for the `ledger_*` tools is `EARVELDAJA_LEDGER_DEFAULT_BACKEND` if set, else the configured host backend. The four migrated write tools (`create_sale_invoice`, `create_purchase_invoice`, `create_journal`, `confirm_transaction`) also route through this layer against e-arveldaja, with unchanged behaviour. See [ARCHITECTURE.md](ARCHITECTURE.md) → "Ledger abstraction layer".
+Merit is registered only when `MERIT_API_ID` / `MERIT_API_KEY` are set; otherwise only e-arveldaja is available. The default target for the `ledger_*` tools is `EARVELDAJA_LEDGER_DEFAULT_BACKEND` if set, else the configured host backend. The four migrated write tools (`create_sale_invoice`, `create_purchase_invoice`, `create_journal`, `confirm_transaction`) also route through this layer against e-arveldaja, with unchanged behaviour. Mutating `ledger_*` tools are audit-logged like every other mutating tool; writes against a non-e-arveldaja backend go to that backend's own file (`logs/merit.audit.md`). See [ARCHITECTURE.md](ARCHITECTURE.md) → "Ledger abstraction layer".
 
 ### Running a non-e-arveldaja backend (e.g. Merit only)
 
-You can run with Merit configured and **no** e-arveldaja credentials. The server boots as a **ledger session**: it reports that e-arveldaja is unconfigured (so the 133 e-arveldaja-specific tools need credentials) but that Merit is available, and the `ledger_*` tools work against Merit. Because no host backend is configured, Merit becomes the **default**, so unqualified `ledger_*` calls route to it, and `list_ledger_backends` honestly reports e-arveldaja as unconfigured. What you get this way is the full cross-backend surface above — discovery, six reads, four writes, and confirm/void — enough to create and read back invoices, payments, and journals and manage their lifecycle. Per-company backend binding (each connection pointing at its own system) is the direction this is built toward, not yet a finished feature.
+You can run with Merit configured and **no** e-arveldaja credentials. The server boots as a **ledger session**: it reports that e-arveldaja is unconfigured (so the 133 e-arveldaja-specific tools need credentials) but that Merit is available, and the `ledger_*` tools work against Merit. Because no host backend is configured, Merit becomes the **default**, so unqualified `ledger_*` calls route to it, and `list_ledger_backends` honestly reports e-arveldaja as unconfigured. What you get this way is the full cross-backend surface above — discovery, six reads, five writes, and confirm/void — enough to create and read back parties, invoices, payments, and journals and manage their lifecycle. Per-company backend binding (each connection pointing at its own system) is the direction this is built toward, not yet a finished feature.
 
 ## Usage Examples
 

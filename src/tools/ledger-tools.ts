@@ -18,6 +18,7 @@ import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import { toolError } from "../tool-error.js";
+import { logAudit } from "../audit-log.js";
 import { readOnly, create, destructive } from "../annotations.js";
 import { parseJsonObject } from "./crud/shared.js";
 import type { ApiContext } from "./crud/shared.js";
@@ -25,7 +26,7 @@ import { buildLedgerRegistry } from "../ledger/registry.js";
 import type { BuildRegistryOptions } from "../ledger/registry.js";
 import type { LedgerConnector, ListQuery } from "../ledger/port.js";
 import type {
-  JournalEntry, Payment, PurchaseInvoice, Ref, Result, SalesInvoice,
+  JournalEntry, Party, Payment, PurchaseInvoice, Ref, Result, SalesInvoice,
 } from "../ledger/types.js";
 
 const entityParam = z
@@ -46,6 +47,53 @@ const backendParam = z
   .string()
   .optional()
   .describe('Ledger backend id ("e-arveldaja" or "merit"). Defaults to the registry default (EARVELDAJA_LEDGER_DEFAULT_BACKEND, else the configured host backend). Call list_ledger_backends to see options.');
+
+/** Canonical entity name → the audit log's entity_type vocabulary. */
+const AUDIT_ENTITY: Record<string, string> = {
+  salesInvoice: "sale_invoice",
+  purchaseInvoice: "purchase_invoice",
+  journal: "journal",
+  payment: "transaction",
+  party: "client",
+};
+
+/**
+ * Audit a successful ledger mutation, mirroring the tool-level logAudit calls
+ * the e-arveldaja write tools make. Mutations on a non-e-arveldaja backend are
+ * written to that backend's own audit file (logs/<backendId>.audit.md) instead
+ * of the active connection's, so another system's writes are never attributed
+ * to an e-arveldaja company. Non-numeric backend ids (Merit GUIDs) ride in
+ * details.backend_ref because AuditEntry.entity_id is numeric.
+ */
+function auditLedgerMutation(
+  connector: LedgerConnector,
+  entry: {
+    tool: string;
+    action: "CREATED" | "UPDATED" | "CONFIRMED" | "INVALIDATED" | "DELETED";
+    entity: string;
+    id?: Ref | undefined;
+    summary: string;
+    details?: Record<string, unknown>;
+  },
+): void {
+  const backendId = connector.capabilities.backendId;
+  const numericId = entry.id && /^\d+$/.test(entry.id.value) ? Number(entry.id.value) : undefined;
+  logAudit(
+    {
+      tool: entry.tool,
+      action: entry.action,
+      entity_type: AUDIT_ENTITY[entry.entity] ?? entry.entity,
+      ...(numericId !== undefined ? { entity_id: numericId } : {}),
+      summary: entry.summary,
+      details: {
+        backend: backendId,
+        ...(entry.id && numericId === undefined ? { backend_ref: entry.id.value } : {}),
+        ...entry.details,
+      },
+    },
+    backendId === "e-arveldaja" ? undefined : { connectionName: backendId },
+  );
+}
 
 const isoDateParam = z
   .string()
@@ -166,6 +214,42 @@ export function registerLedgerTools(
 
   registerTool(
     server,
+    "ledger_upsert_party",
+    "Create or update a party (customer/vendor) through the unified ledger port on the chosen backend. " +
+      "Accepts a canonical Party object (kind \"customer\"|\"vendor\"|\"both\", name, and optional regCode, " +
+      "vatNumber, email, iban). Pass the party's id (a Ref as returned by ledger_list_parties) to update an " +
+      "existing party; omit it to create one.",
+    {
+      backend: backendParam,
+      party: z
+        .union([z.record(z.string(), z.unknown()), z.string()])
+        .describe("Canonical Party as a JSON object (or JSON string)."),
+    },
+    create,
+    async (args) => {
+      try {
+        const connector = resolveConnector(args.backend);
+        if ("error" in connector) return connector.error;
+        const party = parseJsonObject(args.party, "party") as unknown as Party;
+        const isUpdate = party.id !== undefined;
+        const result = await connector.upsertParty(party);
+        if (result.ok) {
+          auditLedgerMutation(connector, {
+            tool: "ledger_upsert_party", action: isUpdate ? "UPDATED" : "CREATED", entity: "party",
+            id: result.data.id,
+            summary: `${isUpdate ? "Updated" : "Created"} party "${result.data.name}" on ${connector.capabilities.label}`,
+            details: { name: result.data.name, kind: result.data.kind, reg_code: result.data.regCode },
+          });
+        }
+        return serializeResult(result);
+      } catch (e) {
+        return toolError(e);
+      }
+    },
+  );
+
+  registerTool(
+    server,
     "ledger_create_sales_invoice",
     "Create a sales invoice through the unified ledger port on the chosen backend. Accepts a canonical " +
       "invoice object (customer as a Ref or {name, regCode}, docDate/dueDate as YYYY-MM-DD, currency, and " +
@@ -184,7 +268,20 @@ export function registerLedgerTools(
         const connector = resolveConnector(args.backend);
         if ("error" in connector) return connector.error;
         const invoice = parseJsonObject(args.invoice, "invoice") as unknown as SalesInvoice;
-        return serializeResult(await connector.createSalesInvoice(invoice));
+        const result = await connector.createSalesInvoice(invoice);
+        if (result.ok) {
+          auditLedgerMutation(connector, {
+            tool: "ledger_create_sales_invoice", action: "CREATED", entity: "salesInvoice",
+            id: result.data.id,
+            summary: `Created sales invoice${result.data.number ? ` "${result.data.number}"` : ""} on ${connector.capabilities.label}`,
+            details: {
+              number: result.data.number, doc_date: result.data.docDate,
+              currency: result.data.currency, total: result.data.total?.amount,
+              lines: result.data.lines?.length,
+            },
+          });
+        }
+        return serializeResult(result);
       } catch (e) {
         return toolError(e);
       }
@@ -210,7 +307,22 @@ export function registerLedgerTools(
         const connector = resolveConnector(args.backend);
         if ("error" in connector) return connector.error;
         const payment = parseJsonObject(args.payment, "payment") as unknown as Payment;
-        return serializeResult(await connector.recordPayment(payment));
+        const result = await connector.recordPayment(payment);
+        if (result.ok) {
+          // On an explicit-booking backend this confirms an existing bank
+          // transaction; on an auto-post backend it creates a payment document.
+          const explicit = connector.capabilities.bookingModel === "explicit";
+          auditLedgerMutation(connector, {
+            tool: "ledger_record_payment", action: explicit ? "CONFIRMED" : "CREATED", entity: "payment",
+            id: result.data.id,
+            summary: `${explicit ? "Confirmed" : "Recorded"} payment of ${result.data.amount?.amount} ${result.data.amount?.currency} on ${connector.capabilities.label}`,
+            details: {
+              date: result.data.date, amount: result.data.amount?.amount,
+              currency: result.data.amount?.currency, allocations: result.data.allocations?.length,
+            },
+          });
+        }
+        return serializeResult(result);
       } catch (e) {
         return toolError(e);
       }
@@ -236,7 +348,16 @@ export function registerLedgerTools(
         const connector = resolveConnector(args.backend);
         if ("error" in connector) return connector.error;
         const entry = parseJsonObject(args.entry, "entry") as unknown as JournalEntry;
-        return serializeResult(await connector.postJournal(entry));
+        const result = await connector.postJournal(entry);
+        if (result.ok) {
+          auditLedgerMutation(connector, {
+            tool: "ledger_post_journal", action: "CREATED", entity: "journal",
+            id: result.data.id,
+            summary: `Posted journal${result.data.docNo ? ` "${result.data.docNo}"` : ""} (${result.data.postings?.length ?? 0} postings) on ${connector.capabilities.label}`,
+            details: { date: result.data.date, memo: result.data.memo, postings: result.data.postings?.length },
+          });
+        }
+        return serializeResult(result);
       } catch (e) {
         return toolError(e);
       }
@@ -263,7 +384,20 @@ export function registerLedgerTools(
         const connector = resolveConnector(args.backend);
         if ("error" in connector) return connector.error;
         const invoice = parseJsonObject(args.invoice, "invoice") as unknown as PurchaseInvoice;
-        return serializeResult(await connector.createPurchaseInvoice(invoice));
+        const result = await connector.createPurchaseInvoice(invoice);
+        if (result.ok) {
+          auditLedgerMutation(connector, {
+            tool: "ledger_create_purchase_invoice", action: "CREATED", entity: "purchaseInvoice",
+            id: result.data.id,
+            summary: `Created purchase invoice${result.data.vendorBillNo ? ` "${result.data.vendorBillNo}"` : ""} on ${connector.capabilities.label}`,
+            details: {
+              vendor_bill_no: result.data.vendorBillNo, doc_date: result.data.docDate,
+              currency: result.data.currency, total: result.data.total?.amount,
+              lines: result.data.lines?.length,
+            },
+          });
+        }
+        return serializeResult(result);
       } catch (e) {
         return toolError(e);
       }
@@ -282,7 +416,18 @@ export function registerLedgerTools(
       try {
         const connector = resolveConnector(args.backend);
         if ("error" in connector) return connector.error;
-        return serializeResult(await connector.confirm(makeRef(connector, args.entity, args.id)));
+        const ref = makeRef(connector, args.entity, args.id);
+        const result = await connector.confirm(ref);
+        // Only audit on explicit-booking backends; on auto-post backends
+        // confirm() is a status read that mutates nothing.
+        if (result.ok && connector.capabilities.bookingModel === "explicit") {
+          auditLedgerMutation(connector, {
+            tool: "ledger_confirm", action: "CONFIRMED", entity: args.entity, id: ref,
+            summary: `Confirmed ${args.entity} ${args.id} on ${connector.capabilities.label}`,
+            details: { status: result.data.status },
+          });
+        }
+        return serializeResult(result);
       } catch (e) {
         return toolError(e);
       }
@@ -300,7 +445,19 @@ export function registerLedgerTools(
       try {
         const connector = resolveConnector(args.backend);
         if ("error" in connector) return connector.error;
-        return serializeResult(await connector.void(makeRef(connector, args.entity, args.id)));
+        const ref = makeRef(connector, args.entity, args.id);
+        const result = await connector.void(ref);
+        if (result.ok) {
+          // Explicit backends invalidate (reversible to draft); auto-post
+          // backends delete the document outright.
+          const explicit = connector.capabilities.bookingModel === "explicit";
+          auditLedgerMutation(connector, {
+            tool: "ledger_void", action: explicit ? "INVALIDATED" : "DELETED", entity: args.entity, id: ref,
+            summary: `Voided ${args.entity} ${args.id} on ${connector.capabilities.label}`,
+            details: { status: result.data.status },
+          });
+        }
+        return serializeResult(result);
       } catch (e) {
         return toolError(e);
       }

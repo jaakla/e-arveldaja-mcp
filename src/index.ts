@@ -415,8 +415,9 @@ async function main() {
   const ledgerSessionNote = ledgerOnlySession
     ? `Ledger session active. e-arveldaja has no credentials, but these ledger backends are configured: ` +
       `${startupLedgerBackends.map((b) => b.label).join(", ")}. The backend-neutral ledger_* tools ` +
-      `(list_ledger_backends, ledger_list_*, ledger_create_sales_invoice, ledger_create_purchase_invoice, ` +
-      `ledger_record_payment, ledger_post_journal, ledger_confirm, ledger_void) work against them and default ` +
+      `(list_ledger_backends, ledger_list_*, ledger_upsert_party, ledger_create_sales_invoice, ` +
+      `ledger_create_purchase_invoice, ledger_record_payment, ledger_post_journal, ledger_confirm, ` +
+      `ledger_void) work against them and default ` +
       `to the configured backend. The e-arveldaja-specific tools below still require e-arveldaja credentials.\n\n`
     : "";
 

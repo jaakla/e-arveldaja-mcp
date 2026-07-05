@@ -489,6 +489,7 @@ describe("MCP Server Ledger Session (Merit configured, no e-arveldaja)", () => {
     "ledger_list_items",
     "ledger_list_sales_invoices",
     "ledger_list_purchase_invoices",
+    "ledger_upsert_party",
     "ledger_create_sales_invoice",
     "ledger_create_purchase_invoice",
     "ledger_record_payment",

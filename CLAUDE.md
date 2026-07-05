@@ -2,7 +2,7 @@
 
 TypeScript MCP server for Estonian cloud bookkeeping. e-arveldaja (RIK e-Financials) is the native backend with full coverage: 133 e-arveldaja tools (128 with Lightyear disabled — see Tool exposure below), 15 workflow prompts, 15 resources across 12 modules, multiple companies/accounts.
 
-A backend-neutral **ledger layer** (`src/ledger/`, see `ARCHITECTURE.md` → "Ledger abstraction layer") lets the same canonical accounting operations target other Estonian systems through one `LedgerConnector` port — **Merit Aktiva** is the second backend today. Thirteen `ledger_*` tools take a `backend` argument: discovery (`list_ledger_backends`), reads (`ledger_list_accounts`, `ledger_list_tax_rates`, `ledger_list_parties`, `ledger_list_items`, `ledger_list_sales_invoices`, `ledger_list_purchase_invoices`), writes (`ledger_create_sales_invoice`, `ledger_create_purchase_invoice`, `ledger_record_payment`, `ledger_post_journal`), and lifecycle (`ledger_confirm`, `ledger_void`). Four existing write tools (`create_sale_invoice`, `create_purchase_invoice`, `create_journal`, `confirm_transaction`) route through the e-arveldaja adapter with unchanged behaviour. The server can run with a non-e-arveldaja backend only (e.g. Merit-only): it boots as a **ledger session** (e-arveldaja in setup mode but reported as unconfigured, the configured backend available), and that backend becomes the default so unqualified `ledger_*` calls route to it. The ledger-session framing is in `index.ts` (`ledgerOnlySession`). **When working in this repo, do not assume e-arveldaja is the only backend** — the remaining ~130 tools and all workflow prompts are e-arveldaja-specific, but new accounting capabilities should prefer the port so they work across backends. Backend specifics (booking model, numbering, dimensions, VAT scope) live in each adapter's `capabilities`; the canonical model never bakes them in.
+A backend-neutral **ledger layer** (`src/ledger/`, see `ARCHITECTURE.md` → "Ledger abstraction layer") lets the same canonical accounting operations target other Estonian systems through one `LedgerConnector` port — **Merit Aktiva** is the second backend today. Fourteen `ledger_*` tools take a `backend` argument: discovery (`list_ledger_backends`), reads (`ledger_list_accounts`, `ledger_list_tax_rates`, `ledger_list_parties`, `ledger_list_items`, `ledger_list_sales_invoices`, `ledger_list_purchase_invoices`), writes (`ledger_upsert_party`, `ledger_create_sales_invoice`, `ledger_create_purchase_invoice`, `ledger_record_payment`, `ledger_post_journal`), and lifecycle (`ledger_confirm`, `ledger_void`). The mutating `ledger_*` tools write the session audit log; non-e-arveldaja backends get their own file (`logs/merit.audit.md`). Four existing write tools (`create_sale_invoice`, `create_purchase_invoice`, `create_journal`, `confirm_transaction`) route through the e-arveldaja adapter with unchanged behaviour. The server can run with a non-e-arveldaja backend only (e.g. Merit-only): it boots as a **ledger session** (e-arveldaja in setup mode but reported as unconfigured, the configured backend available), and that backend becomes the default so unqualified `ledger_*` calls route to it. The ledger-session framing is in `index.ts` (`ledgerOnlySession`). **When working in this repo, do not assume e-arveldaja is the only backend** — the remaining ~130 tools and all workflow prompts are e-arveldaja-specific, but new accounting capabilities should prefer the port so they work across backends. Backend specifics (booking model, numbering, dimensions, VAT scope) live in each adapter's `capabilities`; the canonical model never bakes them in.
 
 ## Quick Start
 
@@ -81,7 +81,7 @@ optional feature group that can be dropped when unused (see
   investments. Default: Lightyear is enabled.
 
 The default surface is 133 e-arveldaja tools (128 with `DISABLE_LIGHTYEAR`) plus
-the 13 backend-neutral `ledger_*` tools, for 146 total (141 with Lightyear
+the 14 backend-neutral `ledger_*` tools, for 147 total (142 with Lightyear
 disabled). (The former `prepare_accounting_inbox` / `run_accounting_inbox_dry_runs`
 tools were exact aliases of `accounting_inbox` `mode="scan"` / `mode="dry_run"`
 and have been removed — use `accounting_inbox` with the matching `mode`.)
@@ -331,5 +331,5 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const transport = new StdioClientTransport({ command: "node", args: ["dist/index.js"] });
 const client = new Client({ name: "test", version: "1.0.0" });
 await client.connect(transport);
-const { tools } = await client.listTools(); // 146 tools (133 e-arveldaja + 13 ledger_*)
+const { tools } = await client.listTools(); // 147 tools (133 e-arveldaja + 14 ledger_*)
 ```

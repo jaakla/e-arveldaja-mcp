@@ -18,15 +18,21 @@ landed in three waves:
    unchanged public behaviour (see "Worked migrations" below).
 3. **Merit-only ledger session + full CRUD surface** — six `ledger_list_*`
    read tools, `ledger_create_purchase_invoice`, `ledger_confirm`,
-   `ledger_void` (13 `ledger_*` tools total), honest credential reporting in
+   `ledger_void`, honest credential reporting in
    discovery, default-backend fallback to the first configured backend, and a
    "ledger session" boot mode so the server is usable with Merit credentials
    and **no** e-arveldaja credentials. Supporting change: OCR
    (`@llamaindex/liteparse`) is now loaded lazily so a missing native binary
    no longer prevents boot on platforms Merit-only sessions may run on.
+4. **Hardening + `ledger_upsert_party`** — the mutating `ledger_*` tools now
+   write the session audit log (non-e-arveldaja backends get their own
+   `logs/<backend>.audit.md`); `MeritHttpClient` paces to ~1 req/s and
+   retries once (any endpoint on 429, idempotent `get*` endpoints on network
+   errors); and `ledger_upsert_party` exposes the port's `upsertParty` as the
+   fourteenth tool.
 
-The 13 `ledger_*` tools plus 133 e-arveldaja tools put the default surface at
-146. The remaining ~129 e-arveldaja tools and all workflow prompts stay
+The 14 `ledger_*` tools plus 133 e-arveldaja tools put the default surface at
+147. The remaining ~129 e-arveldaja tools and all workflow prompts stay
 e-arveldaja-specific by design.
 
 ## Why
@@ -56,9 +62,10 @@ src/ledger/
     http.ts                    POST-with-body transport, query-param auth
     config.ts                  MERIT_API_ID/KEY/COUNTRY → MeritConfig
     adapter.ts                 canonical ↔ Merit JSON (auto-post booking)
-src/tools/ledger-tools.ts      the 13 ledger_* tools: list_ledger_backends,
-                               6 ledger_list_* reads, 4 writes (sales/purchase
-                               invoice, payment, journal), confirm + void
+src/tools/ledger-tools.ts      the 14 ledger_* tools: list_ledger_backends,
+                               6 ledger_list_* reads, 5 writes (upsert party,
+                               sales/purchase invoice, payment, journal),
+                               confirm + void; audit-logs every mutation
 src/index.ts                   registerLedgerTools + the ledger-session boot
                                path (ledgerOnlySession: banner + instructions
                                when only a non-e-arveldaja backend is configured)
@@ -117,7 +124,7 @@ added.
 - `npx vitest run src/ledger` — unit tests cover the signer vector, both
   adapters, and the registry (including honest-discovery and Merit-only
   default resolution).
-- Full suite: 1350/1352 tests pass; the 2 failures are pre-existing on
+- Full suite: 1365/1367 tests pass; the 2 failures are pre-existing on
   `master` and environment-specific (macOS `/var` symlink resolution, an
   accounting-inbox snapshot), unrelated to this branch. The former
   linux-arm64 test-file load failures are fixed by the lazy OCR loading in
@@ -151,16 +158,9 @@ contract that `confirm_transaction`'s test asserts).
 
 ## Follow-ups (out of scope here)
 
-- **Audit logging for the mutating `ledger_*` tools** — the four migrated
-  e-arveldaja write tools kept their tool-level audit entries, but
-  `ledger_create_*` / `ledger_record_payment` / `ledger_post_journal` /
-  `ledger_confirm` / `ledger_void` do not yet write `logs/*.audit.md`.
-- **Merit transport hardening** — rate limiting and a retry on 429/network,
-  matching the e-arveldaja `HttpClient` posture (`fromThrown` already marks
-  those errors `retryable`).
-- **Expose more of the port** — `ledger_upsert_party` (both adapters already
-  implement `upsertParty`); Merit `trialBalance` / `incomeStatement`; Merit's
-  `deliverByEInvoice` / `deliverByEmail` mixin.
+- **Expose more of the port** — Merit `trialBalance` / `incomeStatement`
+  (both adapters currently return `unsupported`); Merit's
+  `deliverByEInvoice` / `deliverByEmail` mixin; the `native()` escape hatch.
 - **Per-company backend binding** — connections each pointing at their own
   backend, instead of one env-configured Merit next to the e-arveldaja
   connection set.
