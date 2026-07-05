@@ -30,6 +30,28 @@ describe("MeritAdapter capabilities", () => {
   });
 });
 
+describe("MeritAdapter.listAccounts", () => {
+  it("maps the real getaccounts fields (AccountID, not Id) and filters inactive rows", async () => {
+    // Field names verified against the live Merit v1 getaccounts response.
+    const { http } = fakeHttp(() => [
+      { AccountID: "0e8abc3d-9cb3-4b2e-beb6-004efc5ab279", Code: "1632", Name: "Aktsiafondid", NonActive: "False", IsParent: "Detailne" },
+      { AccountID: "aaaaaaaa-0000-0000-0000-000000000001", Code: "9999", Name: "Vana konto", NonActive: "True" },
+    ]);
+    const res = await new MeritAdapter(http).listAccounts();
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.data).toHaveLength(1); // inactive row filtered
+    expect(res.data[0]!).toEqual({
+      id: { entity: "account", backend: "merit", value: "0e8abc3d-9cb3-4b2e-beb6-004efc5ab279" },
+      code: "1632",
+      name: "Aktsiafondid",
+    });
+    // Merit exposes no account type / dimension flags — must be omitted, not guessed.
+    expect(res.data[0]!).not.toHaveProperty("type");
+    expect(res.data[0]!).not.toHaveProperty("requiresDimension");
+  });
+});
+
 describe("MeritAdapter.createSalesInvoice", () => {
   it("auto-fills the next number, maps tax code to GUID, and posts immediately", async () => {
     const { http, calls } = fakeHttp((endpoint) => {

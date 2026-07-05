@@ -172,7 +172,8 @@ export function registerLedgerTools(
 
   readTool(
     "ledger_list_accounts",
-    "List the chart of accounts on the chosen backend (canonical Account[]: id, code, name, type, requiresDimension).",
+    "List the chart of accounts on the chosen backend (canonical Account[]: id, code, name, plus type and " +
+      "requiresDimension when the backend exposes them — Merit does not).",
     (c) => c.listAccounts(),
   );
 

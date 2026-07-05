@@ -60,7 +60,7 @@ export class MeritAdapter implements LedgerConnector, EInvoiceCapable {
   async listAccounts(): Promise<Result<Account[]>> {
     try {
       const rows = await this.http.post<MeritAccount[]>("getaccounts");
-      return ok(rows.map(toCanonicalAccount));
+      return ok(rows.filter(meritAccountActive).map(toCanonicalAccount));
     } catch (e) { return fail(fromThrown(e)); }
   }
 
@@ -317,23 +317,18 @@ export function toMeritPurchaseInvoice(inv: PurchaseInvoice, taxIds: Map<string,
   };
 }
 
-function meritAccountType(t: string | undefined): Account["type"] {
-  switch (t) {
-    case "A": return "asset";
-    case "L": return "liability";
-    case "O": return "equity";
-    case "I": return "revenue";
-    default: return "expense";
-  }
-}
 function toCanonicalAccount(a: MeritAccount): Account {
+  // Merit's getaccounts exposes no account-type or dimension flags, so those
+  // canonical fields are omitted rather than guessed (verified against the
+  // live v1 response: AccountID / Code / Name / NonActive / IsParent / Tax*).
   return {
-    id: guidRef("account", a.Id),
+    id: guidRef("account", a.AccountID),
     code: a.Code,
     name: a.Name,
-    type: meritAccountType(a.Type),
-    requiresDimension: a.HasDimensions ?? false,
   };
+}
+function meritAccountActive(a: MeritAccount): boolean {
+  return !(a.NonActive === true || a.NonActive === "True");
 }
 function toCanonicalParty(c: MeritCustomer): Party {
   return { id: guidRef("party", c.Id), kind: "customer", name: c.Name, regCode: c.RegNo, vatNumber: c.VatRegNo };
@@ -371,7 +366,7 @@ function toCanonicalPurchaseInvoice(r: MeritPurchaseFull): PurchaseInvoice {
 }
 
 /* --- trimmed Merit response shapes --- */
-interface MeritAccount { Id: string; Code: AccountCode; Name: string; Type?: string; HasDimensions?: boolean; }
+interface MeritAccount { AccountID: string; Code: AccountCode; Name: string; NonActive?: boolean | string; IsParent?: string; }
 interface MeritTax { Id: string; Code?: string; Name: string; TaxPct: number; }
 interface MeritCustomer { Id: string; Name: string; RegNo?: string; VatRegNo?: string; }
 interface MeritItem { Id: string; Code?: string; Description: string; }

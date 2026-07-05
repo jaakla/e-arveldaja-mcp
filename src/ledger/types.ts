@@ -104,8 +104,9 @@ export interface Account {
   id: Ref<"account">;
   code: AccountCode;
   name: string;
-  type: "asset" | "liability" | "equity" | "revenue" | "expense";
-  /** True when the backend forbids direct postings and requires a dimension. */
+  /** Omitted when the backend does not expose it (Merit's getaccounts has no type field). */
+  type?: "asset" | "liability" | "equity" | "revenue" | "expense";
+  /** True when the backend forbids direct postings and requires a dimension. Omitted when unknown. */
   requiresDimension?: boolean;
 }
 

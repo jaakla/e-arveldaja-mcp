@@ -26,6 +26,10 @@ run("Merit adapter (live, read-only)", () => {
     if (!res.ok) return;
     expect(res.data.length).toBeGreaterThan(0);
     expect(res.data[0]!.id.backend).toBe("merit");
+    // Every account must carry a real backend ref and code — an upstream field
+    // rename (e.g. Id vs AccountID) must fail here, not silently map to "".
+    expect(res.data.every((a) => a.id.value.length > 0)).toBe(true);
+    expect(res.data.every((a) => typeof a.code === "string" && a.code.length > 0)).toBe(true);
   }, 30000);
 
   it("reads VAT rates", async () => {
