@@ -2,7 +2,16 @@
 
 Match unconfirmed bank transactions to open invoices and confirm the matches.
 
-**Backend: e-arveldaja only.** This workflow drives bank-transaction/invoice matching and confirmation, which other ledger backends do not expose. In a ledger session (e-arveldaja unconfigured), tell the user it needs e-arveldaja credentials and stop — do not improvise an equivalent with `ledger_*` tools.
+**Backend routing.** Matching against imported bank transactions is e-arveldaja-native. Use the ledger branch below for any other backend.
+
+### Ledger branch (any non-e-arveldaja backend)
+
+Reconciliation reduces to settle-status review:
+
+1. `ledger_list_sales_invoices` and `ledger_list_purchase_invoices` for the period (defaults to the last ~90 days).
+2. Report unpaid/partial invoices on both sides with `dueDate` aging; flag overdue items.
+3. For payables the user confirms as paid from the bank, record with `ledger_record_payment` (one allocation per call) after a per-payment approval card stating the posted-payment side effect.
+4. Receivable settlements cannot be recorded through the port yet — list them for the backend's own UI.
 
 Start by showing matches. Nothing is confirmed, deleted, or journalized until the user approves the exact action.
 

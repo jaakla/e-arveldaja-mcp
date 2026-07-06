@@ -2,7 +2,13 @@
 
 Run the month-end close checklist, compute financial statements, and flag issues.
 
-**Backend: e-arveldaja only.** This workflow drives the month-end checklist, document audit, and financial statements, which other ledger backends do not expose. In a ledger session (e-arveldaja unconfigured), tell the user it needs e-arveldaja credentials and stop — do not improvise an equivalent with `ledger_*` tools.
+**Backend routing.** The checklist tools (missing documents, duplicate audit, financial statements) are e-arveldaja-native. Use the ledger branch below for any other backend.
+
+### Ledger branch (lighter close review)
+
+1. `ledger_list_sales_invoices` and `ledger_list_purchase_invoices` for the month.
+2. Report: document counts and volumes on both sides, unpaid/partial invoices at month end, anything overdue, and repeated `vendorBillNo` values inside the month (possible double entry).
+3. State plainly that balance sheet, P&L, and trial balance are not exposed through this backend's port yet, and that period lock and VAT filing happen natively in the backend.
 
 **Input:** Month in YYYY-MM format (e.g. `2026-02`).
 

@@ -4,7 +4,11 @@
 
 Preview Wise transaction import results, including fee rows and skipped duplicates, before creating anything.
 
-**Backend: e-arveldaja only.** This workflow drives Wise CSV import and its inter-account duplicate detection, which other ledger backends do not expose. In a ledger session (e-arveldaja unconfigured), tell the user it needs e-arveldaja credentials and stop — do not improvise an equivalent with `ledger_*` tools.
+**Backend routing.** The Wise importer (duplicate detection, fee booking, jar handling) is e-arveldaja-native and its parser needs a configured e-arveldaja connection.
+
+### Ledger branch (limited)
+
+If the client agent can read the CSV itself, treat it as a bank statement and follow the `import-camt` ledger branch from its step 2: match outgoing rows to open purchase invoices and settle with `ledger_record_payment` after per-payment approval. Fees, currency conversions, and jar transfers have no ledger equivalent — list them for manual entry in the backend UI.
 
 User-facing phases:
 1. Preview the Wise CSV import.

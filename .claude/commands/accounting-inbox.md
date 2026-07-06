@@ -4,7 +4,7 @@
 
 Start from one workspace-level scan, propose only the next safe dry-run steps, and ask the fewest possible follow-up questions.
 
-**Backend: e-arveldaja only.** This workflow drives the accounting_inbox scanner, dry-run autopilot, and review queue, which other ledger backends do not expose. In a ledger session (e-arveldaja unconfigured), tell the user it needs e-arveldaja credentials and stop — do not improvise an equivalent with `ledger_*` tools.
+**Backend routing.** The workspace scan and dry-run preview are local and work in any session. Booking/import follow-ups default to e-arveldaja; in a ledger session (or when the user names another backend), route each follow-up to that workflow's ledger branch instead: receipts and invoices → `book-invoice`, receipt folders → `receipt-batch`, bank statements → `import-camt` (payables settlement), Lightyear CSVs → `lightyear-booking`. Follow-ups with no ledger equivalent (transaction classification, review-queue resolution) must be reported as requiring e-arveldaja — never improvised with `ledger_*` tools.
 
 ## Arguments
 

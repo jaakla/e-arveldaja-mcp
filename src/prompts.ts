@@ -8,6 +8,16 @@ import {
   type WorkflowPromptName,
 } from "./workflow-prompt-source.js";
 
+// MCP prompt arguments arrive as strings over the wire (the protocol types
+// them Record<string, string>), so typed prompt args must coerce. Plain
+// z.number() / z.boolean() made prompts with required numeric args (e.g.
+// lightyear-booking) uncallable from spec-compliant clients.
+const promptNumber = z.coerce.number();
+const promptBoolean = z.preprocess(
+  (v) => (v === "true" ? true : v === "false" ? false : v),
+  z.boolean(),
+);
+
 interface SetupPromptOptions {
   offlineTools?: string[];
   note?: string;
@@ -154,7 +164,7 @@ export function registerPrompts(
     "SECOND PASS of the review flow. Calls `continue_accounting_workflow` with action='prepare_action' to emit a concrete `proposed_action` for explicit approval.",
     {
       review_item_json: z.string().describe("JSON object from autopilot.needs_accountant_review[*].resolver_input or a direct review item payload"),
-      save_as_rule: z.boolean().optional().describe("Optional hint to prepare a save_auto_booking_rule action when the treatment is stable"),
+      save_as_rule: promptBoolean.optional().describe("Optional hint to prepare a save_auto_booking_rule action when the treatment is stable"),
       rule_override_json: z.string().optional().describe("Optional JSON object with explicit rule fields such as purchase_article_id, purchase_account_id, liability_account_id, vat_rate_dropdown, reversed_vat_id, reason, match, or category"),
     },
   );
@@ -173,12 +183,12 @@ export function registerPrompts(
 
   registerWorkflowPrompt(
     server,
-    setupInfo,
+    gateUnlessLedgerSession,
     "receipt-batch",
     "Scan a receipt folder, preview auto-bookable results, and only create purchase invoices after explicit approval.",
     {
       folder_path: z.string().describe("Absolute path to the receipt folder"),
-      accounts_dimensions_id: z.number().optional().describe("Optional bank account dimension ID used for bank transaction matching; if omitted, list account dimensions and ask the user to confirm the best match"),
+      accounts_dimensions_id: promptNumber.optional().describe("Optional bank account dimension ID used for bank transaction matching; if omitted, list account dimensions and ask the user to confirm the best match"),
       date_from: z.string().optional().describe("Optional receipt modified-date lower bound (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Optional receipt modified-date upper bound (YYYY-MM-DD)"),
     },
@@ -190,12 +200,12 @@ export function registerPrompts(
 
   registerWorkflowPrompt(
     server,
-    setupInfo,
+    gateUnlessLedgerSession,
     "import-camt",
     "Parse a CAMT.053 statement, preview imported bank transactions, and only create them after approval.",
     {
       file_path: z.string().describe("Absolute path to the CAMT.053 XML file"),
-      accounts_dimensions_id: z.number().optional().describe("Optional bank account dimension ID in e-arveldaja; if omitted, list account dimensions and ask the user to confirm the bank account"),
+      accounts_dimensions_id: promptNumber.optional().describe("Optional bank account dimension ID in e-arveldaja; if omitted, list account dimensions and ask the user to confirm the bank account"),
       date_from: z.string().optional().describe("Optional statement-entry lower bound (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Optional statement-entry upper bound (YYYY-MM-DD)"),
     },
@@ -207,16 +217,16 @@ export function registerPrompts(
 
   registerWorkflowPrompt(
     server,
-    setupInfo,
+    gateUnlessLedgerSession,
     "import-wise",
     "Preview Wise transaction import results, including fees and skipped duplicates, before creating any bank transactions.",
     {
       file_path: z.string().describe("Absolute path to the regular Wise transaction-history.csv export"),
-      accounts_dimensions_id: z.number().optional().describe("Optional bank account dimension ID for the Wise account; if omitted, list account dimensions and ask the user to confirm the Wise bank account"),
-      fee_account_dimensions_id: z.number().optional().describe("Optional Wise fee expense account dimension ID"),
+      accounts_dimensions_id: promptNumber.optional().describe("Optional bank account dimension ID for the Wise account; if omitted, list account dimensions and ask the user to confirm the Wise bank account"),
+      fee_account_dimensions_id: promptNumber.optional().describe("Optional Wise fee expense account dimension ID"),
       date_from: z.string().optional().describe("Optional transaction-date lower bound (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Optional transaction-date upper bound (YYYY-MM-DD)"),
-      skip_jar_transfers: z.boolean().optional().describe("Skip Jar transfers (default true)"),
+      skip_jar_transfers: promptBoolean.optional().describe("Skip Jar transfers (default true)"),
     },
     {
       note: "Wise import preview and execution both depend on live e-arveldaja account and transaction data, so this workflow stays blocked until credentials are configured.",
@@ -225,11 +235,11 @@ export function registerPrompts(
 
   registerWorkflowPrompt(
     server,
-    setupInfo,
+    gateUnlessLedgerSession,
     "classify-unmatched",
     "Classify unmatched bank transactions, preview generated purchase-invoice bookings, and only apply them after approval.",
     {
-      accounts_dimensions_id: z.number().optional().describe("Optional bank account dimension ID used for transaction classification; if omitted, list account dimensions and ask the user to confirm the bank account"),
+      accounts_dimensions_id: promptNumber.optional().describe("Optional bank account dimension ID used for transaction classification; if omitted, list account dimensions and ask the user to confirm the bank account"),
       date_from: z.string().optional().describe("Optional transaction-date lower bound (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Optional transaction-date upper bound (YYYY-MM-DD)"),
     },
@@ -240,12 +250,12 @@ export function registerPrompts(
 
   registerWorkflowPrompt(
     server,
-    setupInfo,
+    gateUnlessLedgerSession,
     "reconcile-bank",
     "Match bank transactions to invoices and optionally auto-confirm exact matches.",
     {
       mode: z.enum(["auto", "review", "transaction"]).optional().describe('Reconciliation mode: "auto" (default), "review", or "transaction"'),
-      transaction_id: z.number().int().positive().optional().describe('Specific bank transaction ID when mode is "transaction"'),
+      transaction_id: promptNumber.int().positive().optional().describe('Specific bank transaction ID when mode is "transaction"'),
     },
     {
       note: "Bank reconciliation requires live transactions, invoices, and journals from e-arveldaja, so it cannot run in setup mode.",
@@ -254,7 +264,7 @@ export function registerPrompts(
 
   registerWorkflowPrompt(
     server,
-    setupInfo,
+    gateUnlessLedgerSession,
     "month-end-close",
     "Run the month-end close checklist: check for blockers, find missing documents, detect duplicates, and generate financial statements.",
     { month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, "Expected YYYY-MM").describe('Month in YYYY-MM format, e.g. "2026-03"') },
@@ -286,21 +296,21 @@ export function registerPrompts(
 
   registerWorkflowPrompt(
     server,
-    setupInfo,
+    gateUnlessLedgerSession,
     "lightyear-booking",
     "Book Lightyear investment trades and distributions into e-arveldaja journals. Parses CSV exports, pairs FX conversions, matches capital gains, and creates journal entries.",
     {
       statement_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
       capital_gains_path: z.string().optional().describe("Absolute path to Lightyear CapitalGainsStatement CSV (required for sells)"),
-      investment_account: z.number().describe("Investment asset account number (e.g. 1550)"),
-      broker_account: z.number().describe("Broker cash account number (e.g. 1120)"),
-      income_account: z.number().optional().describe("Distribution income account (e.g. 8320 or 8400)"),
-      gain_loss_account: z.number().optional().describe("Realized gain/loss account for sell trades"),
-      loss_account: z.number().optional().describe("Optional separate realized loss account"),
-      fee_account: z.number().optional().describe("Optional fee expense account"),
-      tax_account: z.number().optional().describe("Withheld tax account for distributions"),
-      investment_dimension_id: z.number().optional().describe("Optional dimension ID for the investment account"),
-      broker_dimension_id: z.number().optional().describe("Optional dimension ID for the broker account"),
+      investment_account: promptNumber.describe("Investment asset account number (e.g. 1550)"),
+      broker_account: promptNumber.describe("Broker cash account number (e.g. 1120)"),
+      income_account: promptNumber.optional().describe("Distribution income account (e.g. 8320 or 8400)"),
+      gain_loss_account: promptNumber.optional().describe("Realized gain/loss account for sell trades"),
+      loss_account: promptNumber.optional().describe("Optional separate realized loss account"),
+      fee_account: promptNumber.optional().describe("Optional fee expense account"),
+      tax_account: promptNumber.optional().describe("Withheld tax account for distributions"),
+      investment_dimension_id: promptNumber.optional().describe("Optional dimension ID for the investment account"),
+      broker_dimension_id: promptNumber.optional().describe("Optional dimension ID for the broker account"),
     },
     {
       note: "Lightyear booking needs live e-arveldaja journal creation and duplicate checks, so it cannot run before credentials are configured.",

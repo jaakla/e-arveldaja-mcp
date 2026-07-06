@@ -4,7 +4,14 @@
 
 Book Lightyear investment activity from CSV exports after explicit dry-run review.
 
-**Backend: e-arveldaja only.** This workflow drives Lightyear CSV parsing and journal booking with LY: duplicate keys, which other ledger backends do not expose. In a ledger session (e-arveldaja unconfigured), tell the user it needs e-arveldaja credentials and stop — do not improvise an equivalent with `ledger_*` tools.
+**Backend routing.** CSV parsing is local; only the journal write differs per backend. Use the ledger branch below for any non-e-arveldaja backend.
+
+### Ledger branch (any non-e-arveldaja backend)
+
+1. Parse with `parse_lightyear_statement` / `parse_lightyear_capital_gains` exactly as below — dry-run defaults, FX pairing, and the BRICEKSP exclusion all apply.
+2. Build the same balanced journal entries and post each with `ledger_post_journal` (pass the `backend`; postings carry account codes; put the `LY:{reference}` key in `docNo` for traceability).
+3. Duplicate protection differs: the port exposes no journal list yet, so previously-booked references cannot be auto-detected. Show the `LY:` keys on the approval card and have the user confirm none are already booked.
+4. On an auto-post backend the GL batch **posts immediately on create**.
 
 User-facing phases:
 1. Parse statements and required capital-gains files.

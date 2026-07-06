@@ -2,7 +2,15 @@
 
 Scan a folder of receipts, preview what can be auto-booked, and only create purchase invoices after approval.
 
-**Backend: e-arveldaja only.** This workflow drives receipt OCR batch booking, supplier resolution, and bank matching, which other ledger backends do not expose. In a ledger session (e-arveldaja unconfigured), tell the user it needs e-arveldaja credentials and stop — do not improvise an equivalent with `ledger_*` tools.
+**Backend routing.** Folder scanning and OCR are local; the batch pipeline (`process_receipt_batch` supplier resolution, duplicate detection, bank matching, invoice creation) is e-arveldaja-native. Use the ledger branch below for any other backend.
+
+### Ledger branch (any non-e-arveldaja backend)
+
+1. `scan_receipt_folder` for candidate files (local).
+2. For each receipt, follow the `book-invoice` ledger branch: `extract_pdf_invoice` → `validate_invoice_data` → vendor match via `ledger_list_parties` → duplicate check via `ledger_list_purchase_invoices` (same `vendorBillNo` + vendor = duplicate, skip it).
+3. Present ONE consolidated approval card covering every receipt: supplier, invoice number, dates, net/VAT/gross, chosen account and tax code, vendors that would be created, receipts skipped as duplicates or unreadable. On an auto-post backend the invoices **post immediately on create** — there is no draft stage to fix afterwards.
+4. After approval, create each with `ledger_create_purchase_invoice` (attach the receipt as `sourceDocument`) and `ledger_upsert_party` for missing vendors first. Report created refs and per-receipt failures.
+5. Bank-transaction matching has no ledger equivalent — skip it and say so.
 
 User-facing phases:
 1. Scan the folder.

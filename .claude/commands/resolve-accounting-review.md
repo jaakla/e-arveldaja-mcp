@@ -4,7 +4,7 @@
 
 Take one accounting review item and turn it into the next concrete step with the fewest possible user questions.
 
-**Backend: e-arveldaja only.** This workflow drives the continue_accounting_workflow review resolver, which other ledger backends do not expose. In a ledger session (e-arveldaja unconfigured), tell the user it needs e-arveldaja credentials and stop — do not improvise an equivalent with `ledger_*` tools.
+**Backend routing.** Review items are produced by e-arveldaja's inbox pipeline and `continue_accounting_workflow` is e-arveldaja-native, so resolution normally requires e-arveldaja credentials. One exception: when the item's recommended treatment is a plain ledger operation (create a purchase invoice, post a journal, record a vendor payment) and the user wants it applied to another backend, hand off to that workflow's ledger branch (`book-invoice`, `lightyear-booking`, `reconcile-bank`) instead of improvising here.
 
 ## Arguments
 

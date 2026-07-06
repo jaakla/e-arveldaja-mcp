@@ -2,7 +2,11 @@
 
 Classify unmatched bank transactions, preview the auto-bookable purchase-invoice groups, and only apply them after approval.
 
-**Backend: e-arveldaja only.** This workflow drives unmatched bank-transaction classification and auto-booking rules, which other ledger backends do not expose. In a ledger session (e-arveldaja unconfigured), tell the user it needs e-arveldaja credentials and stop — do not improvise an equivalent with `ledger_*` tools.
+**Backend routing.** Classification operates on e-arveldaja's unconfirmed (PROJECT) bank transactions, which other backends do not expose through the port.
+
+### Ledger branch (fallback)
+
+There is nothing to classify on an auto-post backend without bank import. Offer the nearest intent instead: review open invoices with the `reconcile-bank` ledger branch (settle-status review plus payment recording). Do not improvise transaction classification with `ledger_*` tools.
 
 User-facing phases:
 1. Classify unmatched rows.

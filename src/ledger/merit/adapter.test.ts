@@ -66,7 +66,7 @@ describe("MeritAdapter.createSalesInvoice", () => {
       docDate: "2026-04-15",
       dueDate: "2026-04-29",
       currency: "EUR",
-      lines: [{ quantity: "1", unitPrice: eur("100.00"), taxCode: "STD24", account: "30001", description: "Consulting" }],
+      lines: [{ item: { code: "SVC01", name: "Consulting" }, quantity: "1", unitPrice: eur("100.00"), taxCode: "STD24", account: "30001", description: "Consulting" }],
     };
     const res = await adapter.createSalesInvoice(invoice);
     expect(res.ok).toBe(true);
@@ -145,22 +145,26 @@ describe("MeritAdapter.createPurchaseInvoice", () => {
     const { http } = fakeHttp((endpoint) => (endpoint === "getvendors" ? [] : []));
     const res = await new MeritAdapter(http).createPurchaseInvoice({
       vendor: { entity: "party", backend: "merit", value: "MISSING" },
-      vendorBillNo: "X", docDate: "2026-04-15", dueDate: "2026-04-29", currency: "EUR", lines: [],
+      vendorBillNo: "X", docDate: "2026-04-15", dueDate: "2026-04-29", currency: "EUR",
+      lines: [{ quantity: "1", unitPrice: eur("10"), taxCode: "STD24", account: "4017" }],
     });
     expect(!res.ok && res.error.code).toBe("not_found");
   });
 });
 
 describe("MeritAdapter.recordPayment", () => {
-  it("resolves BillNo/VendorName from the invoice and IBAN from the vendor, then sends the flat payload", async () => {
+  it("resolves BillNo/VendorName from the Header-nested detail, IBAN from the vendor, and BankId from the bank's account code", async () => {
     const { http, calls } = fakeHttp((endpoint) => {
-      if (endpoint === "getpurchorder") return { BillId: "BILL-1", BillNo: "INV-9", VendorName: "Tarnija OÜ" };
+      // Live shapes: getpurchorder nests the invoice under Header; getbanks
+      // maps GL account codes to BankId GUIDs.
+      if (endpoint === "getpurchorder") return { Header: { PIHId: "BILL-1", BillNo: "INV-9", VendorName: "Tarnija OÜ" }, Lines: [] };
       if (endpoint === "getvendors") return [{ VendorId: "VEN-1", Name: "Tarnija OÜ", BankAccount: "EE001234" }];
+      if (endpoint === "getbanks") return [{ BankId: "BANK-GUID", Name: "LHV", AccountCode: "1010", CurrencyCode: "EUR" }];
       if (endpoint === "sendPaymentV") return { InvoiceId: "PAY-1" };
       return [];
     });
     const res = await new MeritAdapter(http).recordPayment({
-      bank: { entity: "account", backend: "merit", value: "BANK-1" },
+      bank: { entity: "account", backend: "merit", value: "1010" },
       date: "2026-04-30",
       amount: eur("124.00"),
       allocations: [{ target: { entity: "purchaseInvoice", backend: "merit", value: "BILL-1" }, amount: eur("124.00") }],
@@ -171,7 +175,7 @@ describe("MeritAdapter.recordPayment", () => {
     const call = calls.find((c) => c.endpoint === "sendPaymentV")!;
     expect(call.version).toBe("v1"); // EUR → v1
     expect(call.body).toMatchObject({
-      BankId: "BANK-1", VendorName: "Tarnija OÜ", BillNo: "INV-9",
+      BankId: "BANK-GUID", VendorName: "Tarnija OÜ", BillNo: "INV-9",
       Amount: 124, IBAN: "EE001234", PaymentDate: "20260430",
     });
     expect(call.body).not.toHaveProperty("PaymentRow");
@@ -228,7 +232,7 @@ describe("MeritAdapter parties and items", () => {
     const vendor = await adapter.upsertParty({ kind: "vendor", name: "Uus Tarnija", iban: "EE555" });
     expect(vendor.ok && vendor.data.id?.value).toBe("V-NEW");
     const vcall = calls.find((c) => c.endpoint === "sendvendor")!;
-    expect(vcall.version).toBe("v1");
+    expect(vcall.version).toBe("v2"); // sendvendor 404s on v1 (live-verified)
     expect(vcall.body).toMatchObject({ Name: "Uus Tarnija", BankAccount: "EE555" });
 
     const customer = await adapter.upsertParty({ kind: "customer", name: "Uus Klient" });

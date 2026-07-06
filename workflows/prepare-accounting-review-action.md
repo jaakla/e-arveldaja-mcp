@@ -2,7 +2,7 @@
 
 Turn a resolved accounting review item into the next concrete action, such as cleaning up a duplicate transaction or saving a stable auto-booking rule.
 
-**Backend: e-arveldaja only.** This workflow drives the continue_accounting_workflow action preparer, which other ledger backends do not expose. In a ledger session (e-arveldaja unconfigured), tell the user it needs e-arveldaja credentials and stop — do not improvise an equivalent with `ledger_*` tools.
+**Backend routing.** Prepared actions execute e-arveldaja-native tools, so this pass requires e-arveldaja credentials. If the user wants the equivalent action on another backend, do not prepare a native action — hand off to the matching workflow's ledger branch and its own approval card.
 
 ## Arguments
 

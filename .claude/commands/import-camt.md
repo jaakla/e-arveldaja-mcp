@@ -4,7 +4,17 @@
 
 Parse a CAMT.053 statement, preview the import, and only create bank transactions after approval.
 
-**Backend: e-arveldaja only.** This workflow drives CAMT statement import and PROJECT bank-transaction creation, which other ledger backends do not expose. In a ledger session (e-arveldaja unconfigured), tell the user it needs e-arveldaja credentials and stop — do not improvise an equivalent with `ledger_*` tools.
+**Backend routing.** Parsing is local (`parse_camt053`); creating bank transactions is e-arveldaja-native. Use the ledger branch below for any other backend.
+
+### Ledger branch (any non-e-arveldaja backend)
+
+On an auto-post backend without bank import, the statement is used to settle open invoices rather than to create bank transactions:
+
+1. `parse_camt053` locally (all untrusted-text rules apply).
+2. `ledger_list_purchase_invoices` for the statement period; match outgoing statement rows to open invoices (`settle` unpaid/partial) by amount and counterparty name.
+3. One approval card per match: date, amount, vendor, invoice ref, and the side effect — a posted payment document.
+4. After approval, `ledger_record_payment` per match (a single allocation targeting the invoice ref).
+5. Incoming customer receipts and unmatched rows cannot be recorded through the port yet — list them for manual entry in the backend's own UI.
 
 User-facing phases:
 1. Parse the statement.

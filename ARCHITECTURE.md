@@ -63,8 +63,9 @@ flowchart TB
 - Do not assume e-arveldaja is the only accounting backend.
 - Most native tools are e-arveldaja-specific; `src/ledger/` is the backend-neutral surface.
 - Treat workflow prompt names as business intents, not proof of backend portability. Read the workflow source to see whether the current recipe calls native tools or `ledger_*`.
-- Three recipes are backend-aware (`book-invoice`, `new-supplier`, `company-overview`): each opens with a Step 0 that routes to a ledger branch on non-e-arveldaja backends, and in a ledger session these prompts serve their runbook instead of the setup-mode text. The rest declare **Backend: e-arveldaja only** up front and must not be improvised onto other backends with `ledger_*` tools.
+- Every workflow recipe now carries **Backend routing**: backend-aware recipes open with a Step 0 (or a routing note) that defaults to e-arveldaja and routes to a **Ledger branch** on non-e-arveldaja backends; recipes whose machinery has no ledger equivalent say exactly what to hand off or skip. In a ledger session all prompts serve their runbook instead of the setup-mode text. Never improvise an e-arveldaja-native step onto another backend outside a recipe's declared ledger branch.
 - New cross-backend workflows should follow the same pattern: start with `list_ledger_backends` and respect connector `capabilities`.
+- The Merit-only E2E suite (`src/__integration__/merit-e2e-usecases.integration.test.ts`) exercises all 15 prompt use cases against a live Merit demo company; mutating cases are gated behind `MERIT_E2E_WRITE=1`.
 - New cross-backend accounting behaviour should prefer the `LedgerConnector` port when the capability belongs in more than one backend.
 - Each ledger connector declares its real `capabilities`; callers should discover support instead of assuming hidden parity.
 - Mutating workflows must preserve dry-run defaults, explicit approval, audit logging, path validation, and untrusted-text sandboxing.

@@ -93,7 +93,11 @@ export class MeritAdapter implements LedgerConnector, EInvoiceCapable {
     } catch (e) { return fail(fromThrown(e)); }
   }
 
-  /** Kind-aware: vendors go to sendvendor (v1), customers to sendcustomer (v2). */
+  /**
+   * Kind-aware: vendors go to sendvendor, customers to sendcustomer — both v2
+   * (sendvendor 404s on v1; verified live). Both respond with {Id, Name}-style
+   * bodies; the id fallback chain covers the observed variants.
+   */
   async upsertParty(p: Party): Promise<Result<Party>> {
     try {
       const body = {
@@ -106,7 +110,7 @@ export class MeritAdapter implements LedgerConnector, EInvoiceCapable {
         ...(p.raw ?? {}),
       };
       const res = p.kind === "vendor"
-        ? await this.http.post<MeritPartyCreated>("sendvendor", body, { version: "v1" })
+        ? await this.http.post<MeritPartyCreated>("sendvendor", body, { version: "v2" })
         : await this.http.post<MeritPartyCreated>("sendcustomer", body, { version: "v2" });
       const id = res.CustomerId ?? res.VendorId ?? res.Id ?? p.id?.value;
       return ok({ ...p, id: guidRef("party", id) });
@@ -127,6 +131,15 @@ export class MeritAdapter implements LedgerConnector, EInvoiceCapable {
   }
 
   async createSalesInvoice(inv: SalesInvoice): Promise<Result<SalesInvoice>> {
+    // Merit requires an item code on every invoice row ("Artikli kood on
+    // kohustuslik" — verified live). Fail with guidance instead of a 400.
+    const missingItem = (inv.lines ?? []).some((l) => !l.item || (!("value" in l.item) && !l.item.code));
+    if (!inv.customer || missingItem || (inv.lines ?? []).length === 0) {
+      return fail({
+        code: "validation",
+        message: "Merit sales invoices need a customer and at least one line, each with an item (a Ref from ledger_list_items or {code, name}) — the item code is mandatory.",
+      });
+    }
     try {
       const number = inv.number ?? (await this.nextSalesNumber(inv.docDate));
       const taxes = await this.resolveTaxes(inv.lines.map((l) => l.taxCode));
@@ -151,6 +164,9 @@ export class MeritAdapter implements LedgerConnector, EInvoiceCapable {
   }
 
   async createPurchaseInvoice(inv: PurchaseInvoice): Promise<Result<PurchaseInvoice>> {
+    if (!inv.vendor || (inv.lines ?? []).length === 0) {
+      return fail({ code: "validation", message: "Merit purchase invoices need a vendor (Ref or {name, regCode}) and at least one line." });
+    }
     try {
       // Merit requires Vendor to carry BOTH Id and Name, even for an existing
       // vendor — resolve the name when the caller passed only a Ref.
@@ -187,6 +203,9 @@ export class MeritAdapter implements LedgerConnector, EInvoiceCapable {
         return fail({ code: "validation", message: "Merit sendPaymentV settles exactly one bill per call — pass a single allocation." });
       }
       const target = p.allocations[0]!.target;
+      if (!target || typeof target !== "object") {
+        return fail({ code: "validation", message: "Payment allocation needs a target: a purchaseInvoice Ref or {account}." });
+      }
 
       let billNo = typeof raw.BillNo === "string" ? raw.BillNo : undefined;
       let vendorName = typeof raw.VendorName === "string" ? raw.VendorName : undefined;
@@ -197,9 +216,13 @@ export class MeritAdapter implements LedgerConnector, EInvoiceCapable {
             message: "Merit payments are wired for purchase-invoice settlement: allocate to a purchaseInvoice ref, or pass raw.BillNo / raw.VendorName explicitly.",
           });
         }
-        const detail = await this.http.post<MeritPurchaseFull>("getpurchorder", { Id: target.value, SkipAttachment: true });
-        billNo ??= detail.BillNo;
-        vendorName ??= detail.VendorName;
+        // The detail response nests the invoice under Header (live-verified:
+        // {Header, Lines, Payments, Attachment}); older shapes may be flat.
+        const detail = await this.http.post<{ Header?: MeritPurchaseFull } & MeritPurchaseFull>(
+          "getpurchorder", { Id: target.value, SkipAttachment: true });
+        const header = detail.Header ?? detail;
+        billNo ??= header.BillNo;
+        vendorName ??= header.VendorName;
       }
 
       let iban = typeof raw.IBAN === "string" ? raw.IBAN : undefined;
@@ -211,9 +234,20 @@ export class MeritAdapter implements LedgerConnector, EInvoiceCapable {
         return fail({ code: "validation", message: `IBAN missing for vendor "${vendorName ?? "?"}" — pass raw.IBAN or set the vendor's bank account in Merit.` });
       }
 
+      // The canonical bank ref may carry a GL account code (e.g. "1010"), a
+      // bank name, or a BankId GUID — resolve through getbanks so all three
+      // work. Not every getbanks row is a valid payment bank, so an exact
+      // BankId is passed through untouched.
+      let bankId = p.bank?.value;
+      if (bankId) {
+        const banks = await this.http.post<MeritBank[]>("getbanks");
+        const match = banks.find((b) => b.BankId === bankId || b.AccountCode === bankId || b.Name === bankId);
+        bankId = match?.BankId ?? bankId;
+      }
+
       const foreignCurrency = p.amount.currency && p.amount.currency !== "EUR";
       const body: Record<string, unknown> = {
-        ...(p.bank.value ? { BankId: p.bank.value } : {}),
+        ...(bankId ? { BankId: bankId } : {}),
         VendorName: vendorName,
         BillNo: billNo,
         Amount: Number(p.amount.amount),
@@ -496,34 +530,41 @@ function toCanonicalVendor(v: MeritVendor): Party {
     ...(v.BankAccount ? { iban: v.BankAccount } : {}),
   };
 }
-function meritSettle(r: MeritInvoiceFull): SalesInvoice["settle"] {
-  if (r.PaidAmount != null && r.TotalAmount != null && r.PaidAmount >= r.TotalAmount) return "paid";
+/** Live rows carry a Paid boolean plus PaidAmount vs gross TotalSum. */
+function meritSettle(r: { Paid?: boolean; PaidAmount?: number; TotalSum?: number; TotalAmount?: number }): SalesInvoice["settle"] {
+  if (r.Paid === true) return "paid";
+  const gross = r.TotalSum ?? r.TotalAmount;
+  if (r.PaidAmount != null && gross != null && r.PaidAmount >= gross && gross > 0) return "paid";
   if (r.PaidAmount != null && r.PaidAmount > 0) return "partial";
   return "unpaid";
 }
 function toCanonicalSaleInvoice(r: MeritInvoiceFull): SalesInvoice {
+  // Live v2 list rows: id is SIHId, dates are DocumentDate/DueDate (ISO 8601),
+  // gross total is TotalSum. (The sendinvoice CREATE response differs: InvoiceId.)
   return {
-    id: guidRef("salesInvoice", r.InvoiceId),
+    id: guidRef("salesInvoice", r.SIHId ?? r.InvoiceId),
     status: "confirmed",
     settle: meritSettle(r),
     number: r.InvoiceNo,
     customer: guidRef("party", r.CustomerId),
-    docDate: fromYmd(r.DocDate),
-    dueDate: fromYmd(r.DueDate ?? r.DocDate),
+    docDate: fromYmd(r.DocumentDate ?? r.DocDate ?? ""),
+    dueDate: fromYmd(r.DueDate ?? r.DocumentDate ?? r.DocDate ?? ""),
     currency: r.CurrencyCode ?? "EUR",
     lines: [],
-    total: { amount: String(r.TotalAmount ?? 0), currency: r.CurrencyCode ?? "EUR" },
+    total: { amount: String(r.TotalSum ?? r.TotalAmount ?? 0), currency: r.CurrencyCode ?? "EUR" },
   };
 }
 function toCanonicalPurchaseInvoice(r: MeritPurchaseFull): PurchaseInvoice {
+  // Live v1 list rows: id is PIHId, dates are DocumentDate/DueDate (ISO 8601).
+  // (The sendpurchinvoice CREATE response differs: BillId.)
   return {
-    // Purchase rows identify the invoice as BillId (reference-client verified).
-    id: guidRef("purchaseInvoice", r.BillId ?? r.Id),
+    id: guidRef("purchaseInvoice", r.PIHId ?? r.BillId ?? r.Id),
     status: "confirmed",
+    settle: meritSettle(r),
     vendor: guidRef("party", r.VendorId),
     vendorBillNo: r.BillNo,
-    docDate: fromYmd(r.DocDate),
-    dueDate: fromYmd(r.DueDate ?? r.DocDate),
+    docDate: fromYmd(r.DocumentDate ?? r.DocDate ?? ""),
+    dueDate: fromYmd(r.DueDate ?? r.DocumentDate ?? r.DocDate ?? ""),
     currency: r.CurrencyCode ?? "EUR",
     lines: [],
   };
@@ -537,8 +578,17 @@ interface MeritCustomer { CustomerId?: string; Id?: string; Name: string; RegNo?
 interface MeritVendor { VendorId?: string; Id?: string; Name: string; RegNo?: string; VatRegNo?: string; Email?: string; BankAccount?: string; }
 interface MeritItem { ItemId?: string; Id?: string; Code?: string; Name?: string; Description?: string; UnitofMeasureName?: string; }
 interface MeritPartyCreated { CustomerId?: string; VendorId?: string; Id?: string; }
+interface MeritBank { BankId: string; Name?: string; IBANCode?: string; CurrencyCode?: string; AccountCode?: string; }
 interface MeritInvoiceCreated { InvoiceId: string; InvoiceNo?: string; CustomerId?: string; RefNo?: string; }
-interface MeritInvoiceFull { InvoiceId: string; InvoiceNo?: string; CustomerId?: string; DocDate: string; DueDate?: string; CurrencyCode?: string; TotalAmount?: number; PaidAmount?: number; }
+interface MeritInvoiceFull {
+  SIHId?: string; InvoiceId?: string; InvoiceNo?: string; CustomerId?: string;
+  DocumentDate?: string; DocDate?: string; DueDate?: string; CurrencyCode?: string;
+  TotalAmount?: number; TotalSum?: number; PaidAmount?: number; Paid?: boolean;
+}
 interface MeritPurchaseCreated { BillId?: string; PurchInvoiceId?: string; BillNo?: string; VendorId?: string; }
-interface MeritPurchaseFull { BillId?: string; Id?: string; VendorId?: string; VendorName?: string; BillNo: string; DocDate: string; DueDate?: string; CurrencyCode?: string; }
+interface MeritPurchaseFull {
+  PIHId?: string; BillId?: string; Id?: string; VendorId?: string; VendorName?: string; BillNo: string;
+  DocumentDate?: string; DocDate?: string; DueDate?: string; CurrencyCode?: string;
+  TotalAmount?: number; TotalSum?: number; PaidAmount?: number; Paid?: boolean;
+}
 interface MeritPaymentCreated { InvoiceId?: string; PaymentId?: string; }
