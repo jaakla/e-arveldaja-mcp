@@ -137,7 +137,7 @@ a backend supports instead of the adapter silently faking it.
 | `ledger/result.ts` | `Result` envelope; maps thrown `HttpError` → `LedgerError` |
 | `ledger/registry.ts` | Builds configured backends, resolves the default, reports credential state |
 | `ledger/earveldaja/adapter.ts` | Wraps the existing `ApiContext` (explicit booking) |
-| `ledger/merit/{signer,http,config,adapter}.ts` | Merit Aktiva (auto-post booking) |
+| `ledger/merit/{signer,http,config,adapter}.ts` | Merit Aktiva (auto-post booking); validated against the [official API reference](https://api.merit.ee/connecting-robots/reference-manual/) — mapping notes in `docs/merit-api-notes.md` |
 | `tools/ledger-tools.ts` | The 14 `ledger_*` MCP tools over the port |
 
 **Tool surface.** Fourteen backend-neutral `ledger_*` tools take a `backend`

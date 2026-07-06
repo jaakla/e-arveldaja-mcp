@@ -5,15 +5,18 @@
  * document (or a balanced JournalEntry) and Merit posts the double entry
  * itself, so `confirm()` is a no-op. The adapter hides Merit's quirks:
  * caller-assigned invoice numbers, singular `InvoiceRow`, row-level TaxId GUID,
- * required TaxAmount/TotalAmount (real VAT amounts, gross total), YYYYMMDD
- * dates, split customer/vendor endpoints, and the 3-month query cap.
+ * required TaxAmount (real per-rate VAT) and a NET TotalAmount, YYYYMMDD dates,
+ * split customer/vendor endpoints, and the 3-month query cap.
  *
  * Payload shapes, endpoint versions, and response field names are validated
- * against the live-tested jaakla/merit_api reference client. Notable traps it
- * documents: purchase invoices use `InvoiceRow` + `GLAccountCode` (not
- * `Account`), Vendor must carry both Id AND Name, create responses use
- * `BillId` / `InvoiceId`, and every canonical `raw` object is spread into the
- * outgoing payload last so backend-specific fields can be added or overridden.
+ * against the official Merit Aktiva API reference
+ * (https://api.merit.ee/connecting-robots/reference-manual/, see
+ * docs/merit-api-notes.md) and confirmed with live calls. Notable traps:
+ * purchase invoices use `InvoiceRow` + `GLAccountCode` (not `Account`), Vendor
+ * must carry both Id AND Name, TotalAmount is the NET sum ("Amount without
+ * VAT") while Merit derives gross itself, create responses use `BillId` /
+ * `InvoiceId`, and every canonical `raw` object is spread into the outgoing
+ * payload last so backend-specific fields can be added or overridden.
  */
 import type {
   Account, AccountCode, Item, JournalEntry, Money, Party, Payment, Posting,
@@ -97,9 +100,19 @@ export class MeritAdapter implements LedgerConnector, EInvoiceCapable {
    * Kind-aware: vendors go to sendvendor, customers to sendcustomer — both v2
    * (sendvendor 404s on v1; verified live). Both respond with {Id, Name}-style
    * bodies; the id fallback chain covers the observed variants.
+   *
+   * The official reference marks fields required "when adding": a vendor needs
+   * `VatAccountable` + `CountryCode`, a customer needs `NotTDCustomer` +
+   * `CountryCode`. We default these on create (VAT-accountable inferred from a
+   * VAT number; country EE; NotTDCustomer false) so a minimal canonical Party
+   * is accepted; `raw` overrides any of them.
    */
   async upsertParty(p: Party): Promise<Result<Party>> {
     try {
+      const isCreate = !p.id;
+      const kindDefaults = p.kind === "vendor"
+        ? { VatAccountable: Boolean(p.vatNumber), CountryCode: "EE" }
+        : { NotTDCustomer: false, CountryCode: "EE" };
       const body = {
         ...(p.id ? { Id: p.id.value } : {}),
         Name: p.name,
@@ -107,6 +120,7 @@ export class MeritAdapter implements LedgerConnector, EInvoiceCapable {
         VatRegNo: p.vatNumber,
         Email: p.email,
         ...(p.iban ? { BankAccount: p.iban } : {}),
+        ...(isCreate ? kindDefaults : {}),
         ...(p.raw ?? {}),
       };
       const res = p.kind === "vendor"
@@ -429,7 +443,7 @@ export function toMeritSalesInvoice(
   number: string,
   taxes: Map<string, { id: string; pct: number }>,
 ): Record<string, unknown> {
-  const { TaxAmount, net, tax } = computeTaxTotals(inv.lines, taxes);
+  const { TaxAmount, net } = computeTaxTotals(inv.lines, taxes);
   const InvoiceRow = inv.lines.map((l) => ({
     Item: itemPayload(l.item, l.description),
     Quantity: Number(l.quantity),
@@ -452,8 +466,10 @@ export function toMeritSalesInvoice(
     PriceInclVat: false,
     InvoiceRow,
     TaxAmount,
-    // TotalAmount is the GROSS sum (net + VAT) — reference-client verified.
-    TotalAmount: inv.total ? Number(inv.total.amount) : round2(net + tax),
+    // TotalAmount is the NET sum ("Amount without VAT" per the official Merit
+    // API reference). Merit derives the gross TotalSum = TotalAmount + Σ
+    // TaxAmount itself. `raw.TotalAmount` overrides when a caller must pin it.
+    TotalAmount: net,
     ...(inv.footerNote ? { FComment: inv.footerNote } : {}),
     ...(inv.raw ?? {}),
   };
@@ -464,7 +480,7 @@ export function toMeritPurchaseInvoice(
   taxes: Map<string, { id: string; pct: number }>,
   vendor: Record<string, unknown>,
 ): Record<string, unknown> {
-  const { TaxAmount, net, tax } = computeTaxTotals(inv.lines, taxes);
+  const { TaxAmount, net } = computeTaxTotals(inv.lines, taxes);
   return {
     Vendor: vendor,
     BillNo: inv.vendorBillNo,
@@ -484,7 +500,9 @@ export function toMeritPurchaseInvoice(
       ...(l.raw ?? {}),
     })),
     TaxAmount,
-    TotalAmount: inv.total ? Number(inv.total.amount) : round2(net + tax),
+    // NET total ("Amount without VAT" per the official Merit reference);
+    // Merit computes gross itself. `raw.TotalAmount` overrides.
+    TotalAmount: net,
     RoundingAmount: 0,
     ...(inv.sourceDocument
       ? { Attachment: { FileName: inv.sourceDocument.filename, FileContent: inv.sourceDocument.contentBase64 } }

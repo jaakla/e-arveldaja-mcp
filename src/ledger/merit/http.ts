@@ -6,11 +6,13 @@
  * goes on the wire. Errors are thrown with a `status` field so the ledger
  * `fromThrown` mapper can categorize them like the e-arveldaja HttpClient does.
  *
- * Hardening (mirrors the e-arveldaja HttpClient posture; retry semantics and
- * business-error handling validated against the jaakla/merit_api reference
- * client):
- *  - Requests are serialized with a minimum interval — Merit throttles per
- *    API key (~60 requests/minute), so the default paces to ~1 req/s.
+ * Hardening (mirrors the e-arveldaja HttpClient posture; retry and
+ * business-error semantics validated against the official Merit Aktiva API
+ * reference — https://api.merit.ee/connecting-robots/reference-manual/ — see
+ * docs/merit-api-notes.md):
+ *  - Merit's documented limit is 100 requests/minute per API key (429 on
+ *    exceed, with a `Retry-After` header). Requests are serialized with a
+ *    minimum interval; the default ~1 req/s stays comfortably under the cap.
  *  - One retry on 429 (the request was rejected before processing, so it is
  *    safe for any endpoint). Network errors and 5xx are retried only for
  *    `get*` endpoints: since every Merit call is a POST, such a failure after

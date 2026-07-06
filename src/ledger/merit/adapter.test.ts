@@ -78,9 +78,10 @@ describe("MeritAdapter.createSalesInvoice", () => {
     const rows = sent.InvoiceRow as Array<Record<string, unknown>>;
     expect(rows[0]!.TaxId).toBe("TAX-GUID");
     expect(sent.DocDate).toBe("20260415"); // YYYYMMDD
-    // Merit requires REAL VAT amounts and a gross total (100 net + 24% VAT).
+    // Real per-rate VAT amounts; TotalAmount is the NET sum ("Amount without
+    // VAT" per the official Merit reference — Merit derives gross itself).
     expect(sent.TaxAmount).toEqual([{ TaxId: "TAX-GUID", Amount: 24 }]);
-    expect(sent.TotalAmount).toBe(124);
+    expect(sent.TotalAmount).toBe(100);
     // The number lookup must stay inside Merit's ~3-month query cap.
     const lookup = calls.find((c) => c.endpoint === "getinvoices")!.body as Record<string, unknown>;
     expect(lookup.PeriodStart).toBe("20260115"); // docDate - 90d
@@ -91,7 +92,7 @@ describe("MeritAdapter.createSalesInvoice", () => {
 describe("MeritAdapter.createPurchaseInvoice", () => {
   const taxes = [{ Id: "TAX-GUID", Code: "STD24", Name: "24%", TaxPct: 24 }];
 
-  it("sends the reference-verified payload: InvoiceRow, GLAccountCode, TaxAmount, gross total, BillId response", async () => {
+  it("sends the spec-verified payload: InvoiceRow, GLAccountCode, TaxAmount, NET total, BillId response", async () => {
     const { http, calls } = fakeHttp((endpoint) => {
       if (endpoint === "gettaxes") return taxes;
       if (endpoint === "sendpurchinvoice") return { BillId: "BILL-1", BillNo: "INV-9" };
@@ -119,7 +120,7 @@ describe("MeritAdapter.createPurchaseInvoice", () => {
     expect(sent.TransactionDate).toBe("20260415");
     expect(sent.CurrencyRate).toBe(1.0);
     expect(sent.TaxAmount).toEqual([{ TaxId: "TAX-GUID", Amount: 24 }]);
-    expect(sent.TotalAmount).toBe(124);
+    expect(sent.TotalAmount).toBe(100); // NET ("Amount without VAT")
     expect(sent.RoundingAmount).toBe(0);
     expect((sent.Attachment as Record<string, unknown>).FileName).toBe("arve.pdf");
   });
@@ -229,15 +230,39 @@ describe("MeritAdapter parties and items", () => {
       endpoint === "sendvendor" ? { VendorId: "V-NEW" } : { CustomerId: "C-NEW" });
     const adapter = new MeritAdapter(http);
 
-    const vendor = await adapter.upsertParty({ kind: "vendor", name: "Uus Tarnija", iban: "EE555" });
+    // Vendor with a VAT number → VatAccountable true; spec-required CountryCode defaulted.
+    const vendor = await adapter.upsertParty({ kind: "vendor", name: "Uus Tarnija", iban: "EE555", vatNumber: "EE123" });
     expect(vendor.ok && vendor.data.id?.value).toBe("V-NEW");
     const vcall = calls.find((c) => c.endpoint === "sendvendor")!;
     expect(vcall.version).toBe("v2"); // sendvendor 404s on v1 (live-verified)
-    expect(vcall.body).toMatchObject({ Name: "Uus Tarnija", BankAccount: "EE555" });
+    expect(vcall.body).toMatchObject({ Name: "Uus Tarnija", BankAccount: "EE555", VatAccountable: true, CountryCode: "EE" });
 
     const customer = await adapter.upsertParty({ kind: "customer", name: "Uus Klient" });
     expect(customer.ok && customer.data.id?.value).toBe("C-NEW");
-    expect(calls.find((c) => c.endpoint === "sendcustomer")!.version).toBe("v2");
+    const ccall = calls.find((c) => c.endpoint === "sendcustomer")!;
+    expect(ccall.version).toBe("v2");
+    expect(ccall.body).toMatchObject({ Name: "Uus Klient", NotTDCustomer: false, CountryCode: "EE" });
+  });
+
+  it("upsertParty derives VatAccountable=false without a VAT number and lets raw override the defaults", async () => {
+    const { http, calls } = fakeHttp(() => ({ VendorId: "V2" }));
+    await new MeritAdapter(http).upsertParty({
+      kind: "vendor", name: "Mitte-KM tarnija", raw: { VatAccountable: true, CountryCode: "FI" },
+    });
+    const body = calls[0]!.body as Record<string, unknown>;
+    expect(body.VatAccountable).toBe(true); // raw wins over the derived false
+    expect(body.CountryCode).toBe("FI");
+  });
+
+  it("upsertParty on UPDATE (party has id) omits the create-only required defaults", async () => {
+    const { http, calls } = fakeHttp(() => ({ VendorId: "V3" }));
+    await new MeritAdapter(http).upsertParty({
+      kind: "vendor", name: "Olemasolev", id: { entity: "party", backend: "merit", value: "V3" },
+    });
+    const body = calls[0]!.body as Record<string, unknown>;
+    expect(body.Id).toBe("V3");
+    expect(body).not.toHaveProperty("VatAccountable");
+    expect(body).not.toHaveProperty("CountryCode");
   });
 
   it("listItems maps v1 fields (Name, UnitofMeasureName)", async () => {
@@ -294,7 +319,7 @@ describe("pure mappers", () => {
     expect(row).toMatchObject({ AccountCode: "5120", Debit: 10, ProjectCode: "P1", CostCenterCode: "CC2" });
   });
 
-  it("toMeritSalesInvoice uses singular InvoiceRow, a Ref customer id, real VAT and gross total", () => {
+  it("toMeritSalesInvoice uses singular InvoiceRow, a Ref customer id, real VAT and a NET total", () => {
     const body = toMeritSalesInvoice(
       { customer: { entity: "party", backend: "merit", value: "CUST-1" }, docDate: "2026-01-02", dueDate: "2026-01-16", currency: "EUR", lines: [{ quantity: "2", unitPrice: eur("50"), taxCode: "STD24", account: "30001" }] },
       "5",
@@ -303,7 +328,7 @@ describe("pure mappers", () => {
     expect((body.Customer as Record<string, unknown>).Id).toBe("CUST-1");
     expect(Array.isArray(body.InvoiceRow)).toBe(true);
     expect(body.TaxAmount).toEqual([{ TaxId: "TAX-1", Amount: 24 }]);
-    expect(body.TotalAmount).toBe(124); // gross: 100 net + 24 VAT
+    expect(body.TotalAmount).toBe(100); // NET (2 × 50); Merit derives gross itself
   });
 
   it("spreads canonical raw into the payload last so backend-specific fields can override", () => {
