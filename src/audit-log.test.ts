@@ -1,4 +1,7 @@
 import { chmod, mkdtemp, readdir, rm, stat } from "fs/promises";
+// "node:fs" is a distinct specifier from "fs", so vi.doMock("fs") does not
+// intercept it — this stays the real implementation for the fallback test.
+import { mkdirSync as actualMkdirSync } from "node:fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -616,5 +619,58 @@ describe("audit log labels", () => {
     // The current-active log should NOT — otherwise the entry would be
     // misfiled on the wrong company.
     expect(auditLog.getAuditLog()).not.toContain("CONNECTION_SWITCH_INTERRUPTED");
+  });
+});
+
+describe("unwritable working directory (Claude Desktop launches with cwd=/)", () => {
+  let tempDir: string | undefined;
+  let globalDir: string | undefined;
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    delete process.env.EARVELDAJA_CONFIG_DIR;
+    for (const dir of [tempDir, globalDir]) {
+      if (dir) await rm(dir, { recursive: true, force: true });
+    }
+    tempDir = globalDir = undefined;
+  });
+
+  it("falls back to the global config dir instead of crashing the server at startup", async () => {
+    // cwd points at a path that cannot be created (a file, not a directory).
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-unwritable-"));
+    globalDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-global-"));
+    process.env.EARVELDAJA_CONFIG_DIR = globalDir;
+
+    const unwritableCwd = join(tempDir, "nonexistent-root");
+    const auditLog = await loadAuditLogModule(unwritableCwd, {
+      // Simulate mkdir '/logs' failing the way it does under cwd=/.
+      mkdirSync: ((dir: string, ...rest: unknown[]) => {
+        if (dir.startsWith(unwritableCwd)) {
+          const err = new Error(`ENOENT: no such file or directory, mkdir '${dir}'`);
+          (err as NodeJS.ErrnoException).code = "ENOENT";
+          throw err;
+        }
+        return (actualMkdirSync as (d: string, ...r: unknown[]) => unknown)(dir, ...rest);
+      }) as unknown as typeof import("fs").mkdirSync,
+    });
+
+    const warn = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+    // Must not throw — this is what previously killed the whole server.
+    expect(() => auditLog.initAuditLog(() => "merit")).not.toThrow();
+
+    auditLog.logAudit({
+      tool: "ledger_post_journal",
+      action: "CREATED",
+      entity_type: "journal",
+      summary: "Fallback entry",
+      details: {},
+    });
+
+    // Entries land in the global config dir, and the operator is told.
+    expect(auditLog.getAuditLogsDir()).toBe(join(globalDir, "logs"));
+    const files = await readdir(join(globalDir, "logs"));
+    expect(files).toContain("merit.audit.md");
+    expect(warn.mock.calls.some(([msg]) => String(msg).includes("Writing audit logs to"))).toBe(true);
   });
 });

@@ -21,6 +21,7 @@ import {
   normalizeAuditLabel,
   sanitizeAuditLogName,
 } from "./audit-log-labels.js";
+import { getGlobalConfigDir } from "./config.js";
 
 // ---------------------------------------------------------------------------
 // Shared audit filter vocabularies (single source of truth)
@@ -79,8 +80,26 @@ export interface AuditLogLabelAssignment {
   label: string;
 }
 
-const LOGS_DIR = join(process.cwd(), "logs");
-const LABELS_FILE = join(LOGS_DIR, ".audit-labels.json");
+/**
+ * Preferred audit-log location: `logs/` under the working directory the server
+ * was launched in. Captured at module load so a caller that pins `process.cwd()`
+ * (tests, and the per-connection setup) sees a stable path.
+ *
+ * Some MCP clients launch the server with an unwritable working directory —
+ * Claude Desktop uses `/`, where `mkdir /logs` fails with ENOENT/EACCES. Rather
+ * than crash the whole server before a single tool is registered (audit logging
+ * is a compliance feature, not a reason to be unusable), `ensureLogsDir()` falls
+ * back to `logs/` inside the per-user global config dir — the same directory
+ * credentials already fall back to. `getAuditLogsDir()` reports where entries
+ * actually land.
+ */
+const PRIMARY_LOGS_DIR = join(process.cwd(), "logs");
+let logsDir = PRIMARY_LOGS_DIR;
+/** True once neither the primary nor the fallback directory could be created. */
+let auditLoggingDisabled = false;
+let logsDirWarningEmitted = false;
+
+const labelsFilePath = (): string => join(logsDir, ".audit-labels.json");
 const ENTRY_SEPARATOR = "\n---\n\n";
 const META_RE = /^<!-- audit:(\{.*\}) -->$/m;
 const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -97,10 +116,65 @@ interface PersistedAuditLabel {
   fingerprint?: string;
 }
 
-function ensureLogsDir(): void {
-  if (!existsSync(LOGS_DIR)) {
-    mkdirSync(LOGS_DIR, { recursive: true, mode: 0o700 });
+/**
+ * Escape control characters before a path reaches stderr, so a crafted
+ * directory name cannot corrupt terminal output or spoof extra log lines.
+ * (Mirrors `escapeForLog` in config.ts, which is private to that module.)
+ */
+function escapeForStderr(text: string): string {
+  return text.replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]/g, (ch) => `\\x${ch.charCodeAt(0).toString(16).padStart(2, "0")}`);
+}
+
+function tryCreateDir(dir: string): boolean {
+  try {
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+    return true;
+  } catch {
+    return false;
   }
+}
+
+/**
+ * Make the audit-log directory usable, falling back to the global config dir
+ * when the working directory is unwritable. Never throws: a server that cannot
+ * write an audit log must still start (and `logAudit` already swallows write
+ * errors), but it warns loudly so the operator knows mutations are unlogged.
+ *
+ * Returns false when no directory could be created.
+ */
+function ensureLogsDir(): boolean {
+  if (auditLoggingDisabled) return false;
+  if (existsSync(logsDir)) return true;
+  if (tryCreateDir(logsDir)) return true;
+
+  const fallback = join(getGlobalConfigDir(), "logs");
+  if (fallback !== logsDir && tryCreateDir(fallback)) {
+    if (!logsDirWarningEmitted) {
+      logsDirWarningEmitted = true;
+      process.stderr.write(
+        `WARNING: cannot create the audit log directory ${escapeForStderr(logsDir)} ` +
+        `(the MCP client launched this server with an unwritable working directory). ` +
+        `Writing audit logs to ${escapeForStderr(fallback)} instead.\n`
+      );
+    }
+    logsDir = fallback;
+    return true;
+  }
+
+  auditLoggingDisabled = true;
+  if (!logsDirWarningEmitted) {
+    logsDirWarningEmitted = true;
+    process.stderr.write(
+      `WARNING: audit logging is DISABLED — neither ${escapeForStderr(logsDir)} nor ` +
+      `${escapeForStderr(fallback)} could be created. Mutating operations will not be recorded.\n`
+    );
+  }
+  return false;
+}
+
+/** Where audit entries actually land after any fallback. Exported for diagnostics. */
+export function getAuditLogsDir(): string {
+  return logsDir;
 }
 
 function enforcePrivateFileMode(filePath: string): void {
@@ -128,9 +202,9 @@ function appendPrivateTextFile(filePath: string, content: string): void {
 }
 
 function readPersistedAuditLabels(): Record<string, unknown> {
-  if (!existsSync(LABELS_FILE)) return {};
+  if (!existsSync(labelsFilePath())) return {};
   try {
-    return JSON.parse(readFileSync(LABELS_FILE, "utf-8")) as Record<string, unknown>;
+    return JSON.parse(readFileSync(labelsFilePath(), "utf-8")) as Record<string, unknown>;
   } catch {
     return {};
   }
@@ -171,7 +245,7 @@ function loadAuditLabelMap(): void {
 }
 
 function persistAuditLabelMap(): void {
-  ensureLogsDir();
+  if (!ensureLogsDir()) return;
   const persisted = Object.fromEntries(
     Array.from(auditLabelByConnection.entries()).map(([connectionName, label]) => {
       const fingerprint = auditFingerprintByConnection.get(connectionName);
@@ -181,7 +255,7 @@ function persistAuditLabelMap(): void {
       ];
     }),
   );
-  writePrivateTextFile(LABELS_FILE, `${JSON.stringify(persisted, null, 2)}\n`);
+  writePrivateTextFile(labelsFilePath(), `${JSON.stringify(persisted, null, 2)}\n`);
 }
 
 /** Initialize the audit log with a function that returns the current connection name. */
@@ -210,7 +284,7 @@ export function getCurrentAuditLogLabel(connectionName: string): string {
 }
 
 function getLogFilePathForLabel(label: string): string {
-  return join(LOGS_DIR, `${sanitizeAuditLogName(label)}.audit.md`);
+  return join(logsDir, `${sanitizeAuditLogName(label)}.audit.md`);
 }
 
 function getLogFilePathForConnection(connectionName: string): string {
@@ -313,7 +387,7 @@ export function setAuditLogLabels(assignments: AuditLogLabelAssignment[]): void 
     ...assignment,
     tempLabel: `${tempPrefix}_${index}`,
   }));
-  const touchedPaths = new Set<string>([LABELS_FILE]);
+  const touchedPaths = new Set<string>([labelsFilePath()]);
 
   for (const assignment of tempAssignments) {
     touchedPaths.add(getLogFilePathForLabel(getAuditLabel(assignment.connectionName)));
@@ -587,12 +661,12 @@ export function logAudit(
 ): void {
   const full: AuditEntry = { ...entry, timestamp: new Date().toISOString() };
   try {
+    // Resolve the directory BEFORE building the path: ensureLogsDir may switch
+    // `logsDir` to the fallback location, and the path must reflect that.
+    if (!ensureLogsDir()) return;
     const filePath = opts?.connectionName
       ? getLogFilePathForConnection(opts.connectionName)
       : getLogFilePath();
-    if (!existsSync(LOGS_DIR)) {
-      mkdirSync(LOGS_DIR, { recursive: true, mode: 0o700 });
-    }
     const md = renderEntry(full) + ENTRY_SEPARATOR;
     if (Buffer.byteLength(md, "utf-8") > LINUX_PIPE_BUF_BYTES) {
       // Size-warn (not block) so operators notice when cross-process writers
@@ -736,11 +810,11 @@ export function clearAuditLog(): void {
 
 /** List available audit log files with metadata. */
 export function listAuditLogs(): Array<{ connection: string; file: string; entries: number; last_entry?: string }> {
-  if (!existsSync(LOGS_DIR)) return [];
+  if (!existsSync(logsDir)) return [];
   try {
-    const files = readdirSync(LOGS_DIR).filter(f => f.endsWith(".audit.md")).sort();
+    const files = readdirSync(logsDir).filter(f => f.endsWith(".audit.md")).sort();
     return files.map(file => {
-      const filePath = join(LOGS_DIR, file);
+      const filePath = join(logsDir, file);
       const connection = file.replace(/\.audit\.md$/, "");
       let entries = 0;
       let last_entry: string | undefined;
