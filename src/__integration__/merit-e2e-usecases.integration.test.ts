@@ -23,7 +23,11 @@ import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotoc
 import { parseMcpResponse } from "../mcp-json.js";
 import { getMeritConfig } from "../ledger/merit/config.js";
 import { MeritHttpClient } from "../ledger/merit/http.js";
+import { loadDotenvFiles } from "../config.js";
 
+// Pick up MERIT_API_* from the repo .env (chmod 600) so
+// `npm run test:integration` works without manually exporting the keys.
+loadDotenvFiles();
 const meritConfig = getMeritConfig();
 const RUN = meritConfig ? describe : describe.skip;
 const RUN_WRITES = meritConfig && process.env.MERIT_E2E_WRITE === "1" ? describe : describe.skip;
@@ -32,6 +36,7 @@ const DIST_ENTRYPOINT = join(process.cwd(), "dist", "index.js");
 const RUN_KEY = `E2E-${Date.now()}`;
 const TEST_VENDOR_NAME = "E2E-MCP Test Vendor OÜ";
 const TEST_VENDOR_IBAN = "EE382200221020145685";
+const TEST_CUSTOMER_NAME = "E2E-MCP Test Customer OÜ";
 
 interface LedgerResult<T = unknown> { ok: boolean; data?: T; error?: { code: string; message: string } }
 
@@ -151,6 +156,19 @@ RUN("Merit E2E use cases (live, ledger session)", () => {
     expect(taxes.data!.some((t) => t.ratePct === 24)).toBe(true);
   }, 60_000);
 
+  it("ledger_confirm is a safe no-op on the auto-post backend (no network call, reports confirmed)", async () => {
+    const res = await callLedger<{ status: string }>("ledger_confirm", {
+      backend: "merit", entity: "salesInvoice", id: "00000000-0000-0000-0000-000000000000",
+    });
+    expect(res.ok).toBe(true);
+    expect(res.data!.status).toBe("confirmed");
+  }, 30_000);
+
+  // Deliberately NOT covered live: deliverByEInvoice / deliverByEmail — they
+  // send real documents to real recipients (outward-facing side effects), so
+  // they stay unit-tested only. trialBalance / incomeStatement return
+  // `unsupported` by design.
+
   // ---- Write cycle (opt-in): new-supplier → book-invoice → import-camt/
   // ---- reconcile-bank settlement → lightyear-booking journal → void --------
 
@@ -161,15 +179,29 @@ RUN("Merit E2E use cases (live, ledger session)", () => {
     let taxCode: string;
     let itemCode: string;
 
-    it("UC-new-supplier: ledger_upsert_party creates (or finds) the marked test vendor", async () => {
+    it("UC-new-supplier: ledger_upsert_party creates the marked test vendor, or UPDATES it when it exists", async () => {
       const parties = await callLedger<Array<{ id: { value: string }; kind: string; name: string }>>(
         "ledger_list_parties", { backend: "merit" });
       expect(parties.ok).toBe(true);
       const existing = parties.data!.find((p) => p.kind === "vendor" && p.name === TEST_VENDOR_NAME);
       if (existing) {
-        vendorRef = { entity: "party", backend: "merit", value: existing.id.value };
+        // Update path: pass the id so the adapter omits the create-only
+        // required defaults (VatAccountable/CountryCode) — live-verifies the
+        // sendvendor UPDATE variant every run after the first.
+        const updated = await callLedger<{ id: { value: string } }>("ledger_upsert_party", {
+          backend: "merit",
+          party: {
+            id: { entity: "party", backend: "merit", value: existing.id.value },
+            kind: "vendor", name: TEST_VENDOR_NAME, iban: TEST_VENDOR_IBAN,
+            email: `e2e+${RUN_KEY.toLowerCase()}@example.test`,
+          },
+        });
+        expect(updated.ok, JSON.stringify(updated.error ?? {})).toBe(true);
+        vendorRef = { entity: "party", backend: "merit", value: updated.data!.id.value };
         return;
       }
+      // Create path: exercises the official-spec required-on-create defaults
+      // (VatAccountable inferred, CountryCode EE) against live Merit.
       const created = await callLedger<{ id: { value: string } }>("ledger_upsert_party", {
         backend: "merit",
         party: { kind: "vendor", name: TEST_VENDOR_NAME, iban: TEST_VENDOR_IBAN, email: "e2e@example.test" },
@@ -177,6 +209,34 @@ RUN("Merit E2E use cases (live, ledger session)", () => {
       expect(created.ok, JSON.stringify(created.error ?? {})).toBe(true);
       expect(created.data!.id.value.length).toBeGreaterThan(0);
       vendorRef = { entity: "party", backend: "merit", value: created.data!.id.value };
+    }, 60_000);
+
+    it("UC-new-supplier (customer side): sendcustomer v2 creates with spec defaults; update is honestly unsupported", async () => {
+      const parties = await callLedger<Array<{ id: { value: string }; kind: string; name: string }>>(
+        "ledger_list_parties", { backend: "merit" });
+      const existing = parties.data!.find((p) => p.kind === "customer" && p.name === TEST_CUSTOMER_NAME);
+      if (existing) {
+        // Merit exposes no updatecustomer endpoint (404 live) — the adapter
+        // must say so instead of surfacing a confusing "already exists" 400.
+        const res = await callLedger("ledger_upsert_party", {
+          backend: "merit",
+          party: {
+            id: { entity: "party", backend: "merit", value: existing.id.value },
+            kind: "customer", name: TEST_CUSTOMER_NAME, email: "e2e-customer@example.test",
+          },
+        });
+        expect(res.ok).toBe(false);
+        expect(res.error!.code).toBe("unsupported");
+        return;
+      }
+      // Create path: live-verifies sendcustomer v2 with the create-only
+      // defaults (NotTDCustomer=false, CountryCode=EE) the official spec requires.
+      const created = await callLedger<{ id: { value: string } }>("ledger_upsert_party", {
+        backend: "merit",
+        party: { kind: "customer", name: TEST_CUSTOMER_NAME, email: "e2e-customer@example.test" },
+      });
+      expect(created.ok, JSON.stringify(created.error ?? {})).toBe(true);
+      expect(created.data!.id.value.length).toBeGreaterThan(0);
     }, 60_000);
 
     it("UC-book-invoice: ledger_create_purchase_invoice books a marked 0.01 EUR invoice", async () => {

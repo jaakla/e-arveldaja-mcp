@@ -58,8 +58,9 @@ Merit adapter (`src/ledger/merit/`).
 | `listAccounts` | `getaccounts` | v1 | result rows: `AccountID`, `Code`, `Name`, `NonActive`, … (docs spell it `NoActive`; live returns **`NonActive`** — we follow live). No type/dimension fields. |
 | `listTaxRates` | `gettaxes` | v1 | `Id`, `Code`, `Name`, `TaxPct`. |
 | `listParties` | `getcustomers` + `getvendors` | v1 | two registries; ids `CustomerId` / `VendorId`. |
-| `upsertParty` (customer) | `sendcustomer` | **v2** | required on add: `Name`, `NotTDCustomer`, `CountryCode`. Response `{Id, Name}`. |
-| `upsertParty` (vendor) | `sendvendor` | **v2** | required on add: `Name`, `VatAccountable`, `CountryCode`. **v1 404s** (the reference client's v1 default is wrong). Response `{Id, Name}`. |
+| `upsertParty` (customer create) | `sendcustomer` | **v2** | required on add: `Name`, `NotTDCustomer`, `CountryCode`. Response `{Id, Name}`. **Create-only** — passing an `Id` does not update; a duplicate name gets 400 `api-custexists`. There is **no `updatecustomer` endpoint** (404 live), so customer updates are UI-only. |
+| `upsertParty` (vendor create) | `sendvendor` | **v2** | required on add: `Name`, `VatAccountable`, `CountryCode`. **v1 404s** (the reference client's v1 default is wrong). Response `{Id, Name}`. **Create-only** — duplicate name gets 400 `"… on juba olemas"`. |
+| `upsertParty` (vendor update) | `updatevendor` | **v2** | `Id` required, all other fields optional. Responds with the bare string `"Updated"`. |
 | `listItems` | `getitems` | v1 | id `ItemId`; name in `Name`, unit in `UnitofMeasureName`. |
 | `createSalesInvoice` | `sendinvoice` | v1 | see invoice payload below. Response `{InvoiceId, InvoiceNo, CustomerId, RefNo, NewCustomer}`. |
 | `listSalesInvoices` | `getinvoices` | v2 | result id `SIHId`, dates `DocumentDate`/`DueDate`, gross `TotalSum`, `Paid`. |

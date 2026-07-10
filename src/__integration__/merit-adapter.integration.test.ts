@@ -13,7 +13,11 @@ import { describe, expect, it } from "vitest";
 import { MeritAdapter } from "../ledger/merit/adapter.js";
 import { MeritHttpClient } from "../ledger/merit/http.js";
 import { getMeritConfig } from "../ledger/merit/config.js";
+import { loadDotenvFiles } from "../config.js";
 
+// Pick up MERIT_API_* from the repo .env (chmod 600) so
+// `npm run test:integration` works without manually exporting the keys.
+loadDotenvFiles();
 const config = getMeritConfig();
 const run = config ? describe : describe.skip;
 

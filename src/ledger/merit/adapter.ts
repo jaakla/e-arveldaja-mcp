@@ -97,36 +97,47 @@ export class MeritAdapter implements LedgerConnector, EInvoiceCapable {
   }
 
   /**
-   * Kind-aware: vendors go to sendvendor, customers to sendcustomer — both v2
-   * (sendvendor 404s on v1; verified live). Both respond with {Id, Name}-style
-   * bodies; the id fallback chain covers the observed variants.
-   *
-   * The official reference marks fields required "when adding": a vendor needs
-   * `VatAccountable` + `CountryCode`, a customer needs `NotTDCustomer` +
-   * `CountryCode`. We default these on create (VAT-accountable inferred from a
-   * VAT number; country EE; NotTDCustomer false) so a minimal canonical Party
-   * is accepted; `raw` overrides any of them.
+   * Kind-aware create/update (live-verified semantics):
+   *  - CREATE: sendvendor / sendcustomer, both v2 (sendvendor 404s on v1).
+   *    These endpoints are create-only — passing an Id does NOT update; Merit
+   *    rejects with "already exists" on a duplicate name. The official spec's
+   *    required-on-create fields are defaulted (vendor: VatAccountable inferred
+   *    from a VAT number + CountryCode EE; customer: NotTDCustomer false +
+   *    CountryCode EE); `raw` overrides any of them.
+   *  - UPDATE (party carries an id): vendors go to updatevendor v2 (responds
+   *    with the bare string "Updated"). Customers CANNOT be updated — Merit
+   *    exposes no updatecustomer endpoint (404 live) — so that returns
+   *    `unsupported` instead of a confusing "already exists" error.
    */
   async upsertParty(p: Party): Promise<Result<Party>> {
     try {
-      const isCreate = !p.id;
-      const kindDefaults = p.kind === "vendor"
-        ? { VatAccountable: Boolean(p.vatNumber), CountryCode: "EE" }
-        : { NotTDCustomer: false, CountryCode: "EE" };
-      const body = {
-        ...(p.id ? { Id: p.id.value } : {}),
+      const common = {
         Name: p.name,
         RegNo: p.regCode,
         VatRegNo: p.vatNumber,
         Email: p.email,
         ...(p.iban ? { BankAccount: p.iban } : {}),
-        ...(isCreate ? kindDefaults : {}),
-        ...(p.raw ?? {}),
       };
+
+      if (p.id) {
+        if (p.kind !== "vendor") {
+          return fail({
+            code: "unsupported",
+            message: "Merit's API has no customer-update endpoint (updatecustomer does not exist); update the customer in Merit's UI. Only vendor updates are supported (updatevendor).",
+          });
+        }
+        await this.http.post("updatevendor", { Id: p.id.value, ...common, ...(p.raw ?? {}) }, { version: "v2" });
+        return ok({ ...p });
+      }
+
+      const kindDefaults = p.kind === "vendor"
+        ? { VatAccountable: Boolean(p.vatNumber), CountryCode: "EE" }
+        : { NotTDCustomer: false, CountryCode: "EE" };
+      const body = { ...common, ...kindDefaults, ...(p.raw ?? {}) };
       const res = p.kind === "vendor"
         ? await this.http.post<MeritPartyCreated>("sendvendor", body, { version: "v2" })
         : await this.http.post<MeritPartyCreated>("sendcustomer", body, { version: "v2" });
-      const id = res.CustomerId ?? res.VendorId ?? res.Id ?? p.id?.value;
+      const id = res.CustomerId ?? res.VendorId ?? res.Id;
       return ok({ ...p, id: guidRef("party", id) });
     } catch (e) { return fail(fromThrown(e)); }
   }

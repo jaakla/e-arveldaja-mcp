@@ -254,15 +254,30 @@ describe("MeritAdapter parties and items", () => {
     expect(body.CountryCode).toBe("FI");
   });
 
-  it("upsertParty on UPDATE (party has id) omits the create-only required defaults", async () => {
-    const { http, calls } = fakeHttp(() => ({ VendorId: "V3" }));
-    await new MeritAdapter(http).upsertParty({
+  it("upsertParty on UPDATE routes vendors to updatevendor v2 without create-only defaults", async () => {
+    // sendvendor is create-only (live: 400 "on juba olemas"); updates use
+    // updatevendor, which responds with the bare string "Updated".
+    const { http, calls } = fakeHttp(() => "Updated");
+    const res = await new MeritAdapter(http).upsertParty({
       kind: "vendor", name: "Olemasolev", id: { entity: "party", backend: "merit", value: "V3" },
     });
-    const body = calls[0]!.body as Record<string, unknown>;
+    expect(res.ok && res.data.id?.value).toBe("V3");
+    const call = calls[0]!;
+    expect(call.endpoint).toBe("updatevendor");
+    expect(call.version).toBe("v2");
+    const body = call.body as Record<string, unknown>;
     expect(body.Id).toBe("V3");
     expect(body).not.toHaveProperty("VatAccountable");
     expect(body).not.toHaveProperty("CountryCode");
+  });
+
+  it("upsertParty on UPDATE of a customer fails with unsupported (Merit has no updatecustomer)", async () => {
+    const { http, calls } = fakeHttp(() => ({}));
+    const res = await new MeritAdapter(http).upsertParty({
+      kind: "customer", name: "Klient", id: { entity: "party", backend: "merit", value: "C1" },
+    });
+    expect(!res.ok && res.error.code).toBe("unsupported");
+    expect(calls).toHaveLength(0); // rejected before any network call
   });
 
   it("listItems maps v1 fields (Name, UnitofMeasureName)", async () => {
